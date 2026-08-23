@@ -143,6 +143,17 @@ SMTP_USERNAME = "prashantjinde@gmail.com"        # the SENDING account's login (
 SMTP_PASSWORD = "qqxbcmaupmvjjfmq"        # an app password, NOT the account's normal login password
 SMTP_FROM = "prashantjinde@gmail.com"            # the "From:" address shown to recipients
 
+# ------------------------------------------------------------------
+# Runtime logging for Render
+# ------------------------------------------------------------------
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("msbte_tool")
+
 
 # ==========================================================
 # AUTHENTICATION -- multi-tenant: each Institute signs up independently,
@@ -193,38 +204,59 @@ def _generate_verification_code():
 
 
 def send_email(to_address, subject, body):
-    """Sends one plain-text email via SMTP, using the SMTP_* constants
-    above. Raises a clear, specific error rather than failing silently:
-    - RuntimeError if SMTP_HOST/SMTP_FROM haven't been configured yet
-      (the most likely failure while this is still being set up).
-    - Whatever smtplib itself raises (auth failure, connection refused,
-      etc.) propagates unchanged -- the caller decides how to surface it
-      to the user (see sign_up_institute()/forgot_institute_credentials()
-      for how callers currently handle this).
-    """
+    """Send a plain-text email via SMTP with Render-visible diagnostics."""
+    logger.info(
+        "SMTP: start | host=%s | port=%s | from=%s | to=%s | subject=%s",
+        SMTP_HOST or "<EMPTY>", SMTP_PORT, SMTP_FROM or "<EMPTY>",
+        to_address or "<EMPTY>", subject
+    )
+
     if not SMTP_HOST or not SMTP_FROM:
+        logger.error(
+            "SMTP: incomplete configuration | host=%r | username=%r | "
+            "from=%r | password_configured=%s",
+            SMTP_HOST, SMTP_USERNAME, SMTP_FROM, bool(SMTP_PASSWORD)
+        )
         raise RuntimeError(
             "Email sending isn't configured yet -- fill in SMTP_HOST, "
             "SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM in msbte_tool.py "
             "before sign-up/forgot-password emails can be sent."
         )
+
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = SMTP_FROM
     msg["To"] = to_address
     msg.set_content(body)
 
-    if SMTP_PORT == 465:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-            if SMTP_USERNAME:
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-    else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            if SMTP_USERNAME:
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
+    try:
+        logger.info("SMTP: connecting to %s:%s", SMTP_HOST, SMTP_PORT)
+
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+                logger.info("SMTP: SSL connection established")
+                if SMTP_USERNAME:
+                    logger.info("SMTP: authenticating as %s", SMTP_USERNAME)
+                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                    logger.info("SMTP: authentication successful")
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+                logger.info("SMTP: TCP connection established")
+                logger.info("SMTP: starting TLS")
+                server.starttls()
+                logger.info("SMTP: TLS established")
+                if SMTP_USERNAME:
+                    logger.info("SMTP: authenticating as %s", SMTP_USERNAME)
+                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                    logger.info("SMTP: authentication successful")
+                server.send_message(msg)
+
+        logger.info("SMTP: email sent successfully")
+
+    except Exception:
+        logger.exception("SMTP: email send FAILED")
+        raise
 
 
 def sign_up_institute(institute_name, username, password, recovery_email, db_path=AUTH_DB_FILE):
@@ -239,7 +271,14 @@ def sign_up_institute(institute_name, username, password, recovery_email, db_pat
     since institute login and department login must always be tellable
     apart) or if sending the verification email fails.
     """
+    logger.info(
+        "SIGNUP: start | institute=%r | username=%r | recovery_email=%r | db=%s",
+        institute_name, username, recovery_email, db_path
+    )
+    logger.info("SIGNUP: initializing auth database")
     init_auth_db(db_path)
+    logger.info("SIGNUP: auth database initialized")
+
     conn = sqlite3.connect(db_path)
     existing = conn.execute(
         "SELECT 1 FROM institutes WHERE username = ? UNION SELECT 1 FROM departments WHERE username = ?",
@@ -257,16 +296,23 @@ def sign_up_institute(institute_name, username, password, recovery_email, db_pat
     )
     conn.commit()
     conn.close()
+    logger.info("SIGNUP: account inserted successfully | username=%r", username)
 
     try:
+        logger.info("SIGNUP: sending verification email | username=%r", username)
         send_email(
             recovery_email, "Verify your MSBTE Result Tool account",
             f"Your verification code is: {code}\n\n"
             f"Enter this code on the sign-up screen to activate your account.",
         )
     except Exception as e:
+        logger.exception(
+            "SIGNUP: verification email FAILED | username=%r | error=%s",
+            username, e
+        )
         return False, f"Account created, but the verification email failed to send: {e}"
 
+    logger.info("SIGNUP: completed successfully | username=%r", username)
     return True, None
 
 
