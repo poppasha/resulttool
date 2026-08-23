@@ -5897,6 +5897,6 @@ def main_page():
 ui.run(
     title="MSBTE Result Tool",
     host="0.0.0.0",
-    port=int(os.environ.get("PORT", 8080)),
+    port=int(os.environ.get("PORT", 10000)),
     reload=False,
 )
