@@ -1,0 +1,14 @@
+# MSBTE Result Tool - Python dependencies
+#
+# Install with:
+#     python -m pip install -r requirements.txt
+#
+# Python standard-library modules used by the project (no pip install needed):
+# asyncio, base64, email, json, os, random, re, shutil, smtplib,
+# sqlite3, string, sys, tkinter
+
+requests
+beautifulsoup4
+Pillow
+reportlab
+nicegui
