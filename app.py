@@ -5893,4 +5893,10 @@ def main_page():
     render_page_body()
 
 
-ui.run(title="MSBTE Result Tool", port=8080, reload=False)
+#ui.run(title="MSBTE Result Tool", port=8080, reload=False)
+ui.run(
+    title="MSBTE Result Tool",
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", 8080)),
+    reload=False,
+)

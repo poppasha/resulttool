@@ -137,11 +137,11 @@ AUTH_DB_FILE = "auth.db"
 # email sending will actually work. Left blank, send_email() below will
 # raise a clear error rather than silently failing, so a missing
 # configuration is obvious immediately rather than discovered later. ---
-SMTP_HOST = ""            # e.g. "smtp.gmail.com"
+SMTP_HOST = "smtp.gmail.com"            # e.g. "smtp.gmail.com"
 SMTP_PORT = 587           # 587 = STARTTLS (most common), 465 = SSL
-SMTP_USERNAME = ""        # the SENDING account's login (often same as SMTP_FROM)
-SMTP_PASSWORD = ""        # an app password, NOT the account's normal login password
-SMTP_FROM = ""            # the "From:" address shown to recipients
+SMTP_USERNAME = "prashantjinde@gmail.com"        # the SENDING account's login (often same as SMTP_FROM)
+SMTP_PASSWORD = "qqxbcmaupmvjjfmq"        # an app password, NOT the account's normal login password
+SMTP_FROM = "prashantjinde@gmail.com"            # the "From:" address shown to recipients
 
 
 # ==========================================================
