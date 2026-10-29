@@ -88,6 +88,7 @@ import sqlite3
 import random
 import string
 import smtplib
+import datetime
 from email.message import EmailMessage
 
 import requests
@@ -137,22 +138,11 @@ AUTH_DB_FILE = "auth.db"
 # email sending will actually work. Left blank, send_email() below will
 # raise a clear error rather than silently failing, so a missing
 # configuration is obvious immediately rather than discovered later. ---
-SMTP_HOST = "smtp.gmail.com"            # e.g. "smtp.gmail.com"
+SMTP_HOST = ""            # e.g. "smtp.gmail.com"
 SMTP_PORT = 587           # 587 = STARTTLS (most common), 465 = SSL
-SMTP_USERNAME = "prashantjinde@gmail.com"        # the SENDING account's login (often same as SMTP_FROM)
-SMTP_PASSWORD = "qqxbcmaupmvjjfmq"        # an app password, NOT the account's normal login password
-SMTP_FROM = "prashantjinde@gmail.com"            # the "From:" address shown to recipients
-
-# ------------------------------------------------------------------
-# Runtime logging for Render
-# ------------------------------------------------------------------
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("msbte_tool")
+SMTP_USERNAME = ""        # the SENDING account's login (often same as SMTP_FROM)
+SMTP_PASSWORD = ""        # an app password, NOT the account's normal login password
+SMTP_FROM = ""            # the "From:" address shown to recipients
 
 
 # ==========================================================
@@ -204,59 +194,38 @@ def _generate_verification_code():
 
 
 def send_email(to_address, subject, body):
-    """Send a plain-text email via SMTP with Render-visible diagnostics."""
-    logger.info(
-        "SMTP: start | host=%s | port=%s | from=%s | to=%s | subject=%s",
-        SMTP_HOST or "<EMPTY>", SMTP_PORT, SMTP_FROM or "<EMPTY>",
-        to_address or "<EMPTY>", subject
-    )
-
+    """Sends one plain-text email via SMTP, using the SMTP_* constants
+    above. Raises a clear, specific error rather than failing silently:
+    - RuntimeError if SMTP_HOST/SMTP_FROM haven't been configured yet
+      (the most likely failure while this is still being set up).
+    - Whatever smtplib itself raises (auth failure, connection refused,
+      etc.) propagates unchanged -- the caller decides how to surface it
+      to the user (see sign_up_institute()/forgot_institute_credentials()
+      for how callers currently handle this).
+    """
     if not SMTP_HOST or not SMTP_FROM:
-        logger.error(
-            "SMTP: incomplete configuration | host=%r | username=%r | "
-            "from=%r | password_configured=%s",
-            SMTP_HOST, SMTP_USERNAME, SMTP_FROM, bool(SMTP_PASSWORD)
-        )
         raise RuntimeError(
             "Email sending isn't configured yet -- fill in SMTP_HOST, "
             "SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM in msbte_tool.py "
             "before sign-up/forgot-password emails can be sent."
         )
-
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = SMTP_FROM
     msg["To"] = to_address
     msg.set_content(body)
 
-    try:
-        logger.info("SMTP: connecting to %s:%s", SMTP_HOST, SMTP_PORT)
-
-        if SMTP_PORT == 465:
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-                logger.info("SMTP: SSL connection established")
-                if SMTP_USERNAME:
-                    logger.info("SMTP: authenticating as %s", SMTP_USERNAME)
-                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                    logger.info("SMTP: authentication successful")
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-                logger.info("SMTP: TCP connection established")
-                logger.info("SMTP: starting TLS")
-                server.starttls()
-                logger.info("SMTP: TLS established")
-                if SMTP_USERNAME:
-                    logger.info("SMTP: authenticating as %s", SMTP_USERNAME)
-                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
-                    logger.info("SMTP: authentication successful")
-                server.send_message(msg)
-
-        logger.info("SMTP: email sent successfully")
-
-    except Exception:
-        logger.exception("SMTP: email send FAILED")
-        raise
+    if SMTP_PORT == 465:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+            if SMTP_USERNAME:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+    else:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            if SMTP_USERNAME:
+                server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
 
 
 def sign_up_institute(institute_name, username, password, recovery_email, db_path=AUTH_DB_FILE):
@@ -271,14 +240,7 @@ def sign_up_institute(institute_name, username, password, recovery_email, db_pat
     since institute login and department login must always be tellable
     apart) or if sending the verification email fails.
     """
-    logger.info(
-        "SIGNUP: start | institute=%r | username=%r | recovery_email=%r | db=%s",
-        institute_name, username, recovery_email, db_path
-    )
-    logger.info("SIGNUP: initializing auth database")
     init_auth_db(db_path)
-    logger.info("SIGNUP: auth database initialized")
-
     conn = sqlite3.connect(db_path)
     existing = conn.execute(
         "SELECT 1 FROM institutes WHERE username = ? UNION SELECT 1 FROM departments WHERE username = ?",
@@ -296,23 +258,16 @@ def sign_up_institute(institute_name, username, password, recovery_email, db_pat
     )
     conn.commit()
     conn.close()
-    logger.info("SIGNUP: account inserted successfully | username=%r", username)
 
     try:
-        logger.info("SIGNUP: sending verification email | username=%r", username)
         send_email(
             recovery_email, "Verify your MSBTE Result Tool account",
             f"Your verification code is: {code}\n\n"
             f"Enter this code on the sign-up screen to activate your account.",
         )
     except Exception as e:
-        logger.exception(
-            "SIGNUP: verification email FAILED | username=%r | error=%s",
-            username, e
-        )
         return False, f"Account created, but the verification email failed to send: {e}"
 
-    logger.info("SIGNUP: completed successfully | username=%r", username)
     return True, None
 
 
@@ -465,6 +420,51 @@ def list_departments_for_institute(institute_id, db_path=AUTH_DB_FILE):
     return [dict(r) for r in rows]
 
 
+def update_department(department_id, department_name=None, username=None, password=None, db_path=AUTH_DB_FILE):
+    """Updates a department's name/username/password (pass only the
+    ones being changed; None leaves that field untouched). Returns
+    (True, None) on success, or (False, error_message) if the new
+    username is already taken by someone else (another department or
+    any institute's own login) -- same global-uniqueness rule
+    create_department() enforces.
+    """
+    conn = sqlite3.connect(db_path)
+    if username is not None:
+        clash = conn.execute(
+            "SELECT 1 FROM departments WHERE username = ? AND id != ? "
+            "UNION SELECT 1 FROM institutes WHERE username = ?",
+            (username, department_id, username),
+        ).fetchone()
+        if clash:
+            conn.close()
+            return False, f"Username '{username}' is already taken."
+        conn.execute("UPDATE departments SET username = ? WHERE id = ?", (username, department_id))
+    if department_name is not None:
+        conn.execute("UPDATE departments SET department_name = ? WHERE id = ?", (department_name, department_id))
+    if password is not None:
+        conn.execute("UPDATE departments SET password = ? WHERE id = ?", (password, department_id))
+    conn.commit()
+    conn.close()
+    return True, None
+
+
+def delete_department(department_id, db_path=AUTH_DB_FILE):
+    """Deletes a department's LOGIN CREDENTIALS ONLY (the row in the
+    departments table) -- this does NOT touch anything that department
+    has ever created on disk (its scheme databases, its
+    layout_mapping.json, its reports/ folder, or its seating chart
+    file). Those all live keyed by the department's NAME in the
+    filesystem (see get_department_folder()), completely independent of
+    this login-credentials row, and are left exactly as they were. The
+    caller (app.py) is responsible for warning the admin about this
+    before calling -- this function itself doesn't ask for confirmation.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM departments WHERE id = ?", (department_id,))
+    conn.commit()
+    conn.close()
+
+
 def authenticate_department(institute_name, username, password, db_path=AUTH_DB_FILE):
     """Checks Department login credentials -- three fields, since
     Department usernames alone (while globally unique) still need the
@@ -510,15 +510,16 @@ def authenticate_department(institute_name, username, password, db_path=AUTH_DB_
 #
 # Seating Chart is the one place that DOES know about scheme -- it's
 # where schemes are discovered (see list_active_schemes(), which reads
-# SEATING_DB_FILE, never DB_FILE) and where the user picks which one is
-# currently active. That selection is what drives set_active_scheme_db()
-# below.
+# that (institute, program, year, session)'s own seating chart file, via
+# seating_chart_db_path() -- never DB_FILE) and where the user picks
+# which one is currently active. That selection is what drives
+# set_active_scheme_db() below.
 #
-# Each scheme gets its own database file, named from four pieces of
-# context typed/chosen once in Seating Chart -- Program, Year, Session
-# (Odd/Even), and the scheme letter itself (auto-detected from the
-# pasted seating chart data, never typed):
-#   <base_dir>/<Program>/<Year>/<Session>/<Scheme>.db
+# Each scheme gets its own database file, named from five pieces of
+# context -- Institute, Program (a department's own name), Year,
+# Session (Odd/Even), and the scheme letter itself (auto-detected from
+# the pasted seating chart data, never typed):
+#   <base_dir>/<Institute>/<Year>/<Program>/<Session>/<Scheme>.db
 # e.g. "DTM/2025_2026/odd/K.db".
 
 def sanitize_path_component(value):
@@ -538,17 +539,56 @@ def sanitize_path_component(value):
     return value
 
 
+def get_department_folder(institute, program, year, base_dir="."):
+    """The one shared folder for this (institute, program, year) --
+    everything belonging to this department, for this year, lives
+    inside it: layout_mapping.json (see get_department_mapping_path()),
+    the reports/ output folder (see get_department_reports_dir()), and
+    every Session/Scheme.db underneath (see scheme_db_path()). Pure
+    function -- no filesystem access.
+
+    `program` is, in practice, a logged-in department's own name.
+    `institute` sits above it so two different institutes can each have
+    a department with the same name without colliding.
+    """
+    institute_s = sanitize_path_component(institute)
+    program_s = sanitize_path_component(program)
+    year_s = sanitize_path_component(year)
+    return os.path.join(base_dir, institute_s, year_s, program_s)
+
+
+def get_department_mapping_path(institute, program, year, session, scheme, base_dir="."):
+    """<Institute>/<Year>/<Program>/<session>/<Scheme>_layout_mapping.json
+    e.g. DKTE/2026_2027/DTM/even/K_layout_mapping.json -- one mapping file
+    per scheme, sitting next to that scheme's K.db / I.db / seating_chart.db."""
+    session_s = sanitize_path_component(session).lower()
+    scheme_s = sanitize_path_component(scheme).upper()
+    return os.path.join(
+        get_department_folder(institute, program, year, base_dir),
+        session_s, f"{scheme_s}_layout_mapping.json",
+    )
+
+
+def get_department_reports_dir(institute, program, year, base_dir="."):
+    """Path to THIS department's own reports/ output folder -- one per
+    (institute, program, year), never shared with any other department
+    or institute. See get_department_folder()."""
+    return os.path.join(get_department_folder(institute, program, year, base_dir), "reports")
+
+
 def scheme_db_path(institute, program, year, session, scheme, base_dir="."):
     """Computes (but does not create) the database file path for one
     scheme, given the five pieces of context. Pure function -- no
     filesystem access; see ensure_scheme_db() for the version that
     actually creates the file.
 
-    `institute` sits above `program` (in practice, a logged-in
-    department's name) so two different institutes can each have a
-    department with the same name without colliding -- e.g.
-    "ABC_Polytechnic/Computer_Engineering/..." vs
-    "XYZ_Institute/Computer_Engineering/...".
+    Folder order is Institute/Year/Department/Session/Scheme.db -- Year
+    sits ABOVE Department deliberately, so that everything belonging to
+    one department for one year (its layout_mapping.json, its reports/
+    folder, and every session/scheme database it has) lives together in
+    ONE shared, self-contained folder (see get_department_folder()) --
+    a Report-mode file browser rooted there can only ever show that
+    department's own files, never another department's.
 
     Session is always lowercased in the resulting path ("Odd"/"Even" ->
     "odd"/"even") regardless of how it's displayed in the UI dropdown --
@@ -556,12 +596,10 @@ def scheme_db_path(institute, program, year, session, scheme, base_dir="."):
     Institute, Program, and Year are NOT case-normalized -- typed/stored
     case is kept as-is.
     """
-    institute_s = sanitize_path_component(institute)
-    program_s = sanitize_path_component(program)
-    year_s = sanitize_path_component(year)
+    department_folder = get_department_folder(institute, program, year, base_dir)
     session_s = sanitize_path_component(session).lower()
     scheme_s = sanitize_path_component(scheme).upper()
-    return os.path.join(base_dir, institute_s, program_s, year_s, session_s, f"{scheme_s}.db")
+    return os.path.join(department_folder, session_s, f"{scheme_s}.db")
 
 
 def ensure_scheme_db(institute, program, year, session, scheme, base_dir="."):
@@ -580,6 +618,47 @@ def ensure_scheme_db(institute, program, year, session, scheme, base_dir="."):
     return path
 
 
+def scheme_db_exists(institute, program, year, session, scheme, base_dir="."):
+    """Pure existence check -- computes this scheme's path (see
+    scheme_db_path()) and reports whether its database file has
+    actually been created yet, WITHOUT creating it. This is what the
+    "fresh scheme" vs "prefilled scheme" decision in the sidebar is
+    based on: a scheme is "fresh" if and only if this returns False --
+    it has never had "Call Global Scheme Group" clicked for it (or it
+    was deleted via delete_scheme_db() and hasn't been recreated since).
+    """
+    path = scheme_db_path(institute, program, year, session, scheme, base_dir)
+    return os.path.exists(path)
+
+
+def delete_scheme_db(institute, program, year, session, scheme, base_dir="."):
+    """Permanently deletes this scheme's ENTIRE database file -- every
+    table it contains (semester_headings, student_records, subjects,
+    canonical_marks, course codes, faculty entries, report settings,
+    yearly gap flags, everything Train/Extract/Course Codes/Recheck/
+    Offline Import have ever written for this scheme) -- not just
+    emptying its tables, the file itself stops existing. This is
+    irreversible; the caller (app.py) is responsible for confirming
+    with the user first.
+
+    Deliberately does NOT touch this scheme's own seating chart file
+    (see seating_chart_db_path()) or its scheme_declarations record --
+    deleting a scheme's operational database doesn't un-declare the
+    scheme. The next time this exact (institute, program, year, session,
+    scheme) is selected, scheme_db_exists() will correctly report False
+    again, and "Call Global Scheme Group" will recreate it fresh and
+    empty, exactly as if it had never been touched.
+
+    Returns True if a file was actually found and deleted, False if
+    there was nothing there to delete (already fresh/never created).
+    """
+    path = scheme_db_path(institute, program, year, session, scheme, base_dir)
+    if not os.path.exists(path):
+        return False
+    os.remove(path)
+    return True
+
+
 def set_active_scheme_db(path):
     """The one place a scheme selection actually takes effect. Every
     function elsewhere in this module that reads/writes scheme-scoped
@@ -591,6 +670,61 @@ def set_active_scheme_db(path):
     """
     global DB_FILE
     DB_FILE = path
+
+
+def set_active_department_mapping_file(path):
+    """Companion to set_active_scheme_db() -- same pattern, one level
+    coarser: layout_mapping.json is scoped per (institute, program,
+    year), not per (institute, program, year, session, scheme) like
+    DB_FILE is (see get_department_mapping_path()). Reassigning
+    MAPPING_FILE here is what makes every existing MAPPING_FILE
+    reference in app.py (Train's save, Extract's/Course Codes' load
+    checks) transparently read/write THIS department's own mapping
+    file, without any of those call sites needing to change at all --
+    they already just read the module-level MAPPING_FILE constant.
+    """
+    global MAPPING_FILE
+    MAPPING_FILE = path
+
+
+# The currently active scheme's seating-chart file and scheme letter,
+# for the two functions deep inside Report mode that need to read
+# seating chart data directly (_compute_student_status_full,
+# compute_seating_chart_gap). Same dynamic-repointing pattern as
+# DB_FILE/MAPPING_FILE/REPORTS_DIR, kept as plain globals here (rather
+# than threading these as new parameters through the ~10 Report-
+# generation functions that eventually call into these two) so that not
+# one of those intermediate functions' signatures needs to change.
+#
+# ACTIVE_SEATING_DB_FILE is the exact same file scheme_db_path()'s
+# session folder holds a seating_chart.db in (see
+# seating_chart_db_path()) -- one department's one year's one session's
+# own file, not the old single global SEATING_DB_FILE. ACTIVE_SCHEME is
+# still needed even though the file is already this specific: one
+# seating chart paste legitimately contains MULTIPLE schemes at once
+# (that's the entire mechanism scheme detection is built on), so K and I
+# rows still coexist within this one file -- ACTIVE_SCHEME is what keeps
+# Report mode for scheme I from seeing scheme K's rows (and vice versa)
+# within that shared file. This is exactly the fix for the bug where
+# scheme I's report warned about "missing" enrollments that were
+# actually scheme K's the whole time.
+#
+# Blank/empty by default -- before any scheme is selected, these two
+# functions simply see no chart data at all, which is correct rather
+# than an error.
+ACTIVE_SEATING_DB_FILE = ""
+ACTIVE_SCHEME = ""
+
+
+def set_active_department_context(institute, program, year, session, scheme):
+    """Sets ACTIVE_SEATING_DB_FILE/ACTIVE_SCHEME (see above) -- called
+    from app.py's select_active_scheme() alongside the DB_FILE/
+    MAPPING_FILE/REPORTS_DIR repoints, and reset on logout the same way
+    those are.
+    """
+    global ACTIVE_SEATING_DB_FILE, ACTIVE_SCHEME
+    ACTIVE_SEATING_DB_FILE = seating_chart_db_path(institute, program, year, session)
+    ACTIVE_SCHEME = sanitize_path_component(scheme).upper()
 
 
 def record_scheme_declaration(institute, program, year, session, scheme, source, db_path=SEATING_DB_FILE):
@@ -605,7 +739,8 @@ def record_scheme_declaration(institute, program, year, session, scheme, source,
     DISTINCT scheme FROM seating_chart). This table is what lets the
     scheme picker show EVERY known scheme for a given institute/program/
     year/session, paste-detected or manually-declared, as one combined
-    list, with no distinction visible downstream (see get_known_schemes()).
+    list, with no distinction visible downstream (nothing reads the
+    'source' column at all, in fact -- it's kept purely for debugging).
 
     Sanitized values are stored (matching the actual filename), not the
     raw typed text, so lookups are consistent regardless of how the user
@@ -644,31 +779,6 @@ def record_scheme_declaration(institute, program, year, session, scheme, source,
     )
     conn.commit()
     conn.close()
-
-
-def get_known_schemes(institute, program, year, session, db_path=SEATING_DB_FILE):
-    """Every scheme letter known for this (institute, program, year,
-    session) -- from EITHER path, combined, with no way to tell which
-    path a given letter came from (that distinction only exists in the
-    'source' column for debugging; nothing downstream reads it). This is
-    the single list a scheme picker should show.
-    """
-    institute_s = sanitize_path_component(institute)
-    program_s = sanitize_path_component(program)
-    year_s = sanitize_path_component(year)
-    session_s = sanitize_path_component(session).lower()
-
-    conn = sqlite3.connect(db_path)
-    try:
-        rows = conn.execute(
-            "SELECT DISTINCT scheme FROM scheme_declarations "
-            "WHERE institute = ? AND program = ? AND year = ? AND session = ? ORDER BY scheme",
-            (institute_s, program_s, year_s, session_s),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.close()
-    return [r[0] for r in rows]
 
 
 def list_all_scheme_declarations(institute, program, db_path=SEATING_DB_FILE):
@@ -3460,7 +3570,7 @@ def compute_result_summary_rows(semester_label, db_path=DB_FILE, student_status=
         return []
 
     status_map = compute_student_status(all_extracted, db_path)
-    wanted = {"regular": "Regular", "ex": "EX"}.get(student_status)
+    wanted = resolve_status_filter(student_status)
 
     counts = {}
     for enr in enrollments:
@@ -3520,8 +3630,8 @@ def compute_k7_partb_rows(semester_label, db_path=DB_FILE, student_status="both"
             program_by_enr[rec["enrollment"]] = rec["value"]
 
     enrollments = sorted({r["enrollment"] for r in sem_records if r["enrollment"]})
-    if student_status in ("regular", "ex"):
-        wanted = "Regular" if student_status == "regular" else "EX"
+    wanted = resolve_status_filter(student_status)
+    if wanted is not None:
         enrollments = [enr for enr in enrollments if status_map.get((enr, semester_label)) == wanted]
 
     programme = next(iter(program_by_enr.values()), "")
@@ -3742,7 +3852,7 @@ def generate_k7_partb_pdf(db_path=DB_FILE, out_path=None, student_status="both",
     scale = usable_w_mm / sum(raw_widths)
     col_widths = [w * scale * mm for w in raw_widths]
 
-    out_path = out_path or "K7_PartB_Report.pdf"
+    out_path = out_path or f"K7_PartB_Report{status_file_suffix(student_status)}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
                              leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
                              topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
@@ -3760,7 +3870,7 @@ def generate_k7_partb_pdf(db_path=DB_FILE, out_path=None, student_status="both",
         included_semesters.append(sem_label)
 
         story.extend(build_k7b_heading_flowables(sem_label, db_path))
-        status_note = {"regular": " (Regular)", "ex": " (EX)", "both": ""}.get(student_status, "")
+        status_note = status_note_text(student_status)
         story.append(Paragraph(f"{sem_label.title()}{status_note}", styles["Heading3"]))
         story.append(Spacer(1, 3))
         gap_style = styles["Normal"].clone("k7bgap")
@@ -3986,8 +4096,8 @@ def compute_k7_partc_rows(semester_label, db_path=DB_FILE, student_status="both"
     status_map = compute_student_status(all_extracted, db_path)
 
     enrollments = sorted({r["enrollment"] for r in sem_records if r["enrollment"]})
-    if student_status in ("regular", "ex"):
-        wanted = "Regular" if student_status == "regular" else "EX"
+    wanted = resolve_status_filter(student_status)
+    if wanted is not None:
         enrollments = [enr for enr in enrollments if status_map.get((enr, semester_label)) == wanted]
 
     def score_index(raw_values, max_marks):
@@ -4162,7 +4272,7 @@ def generate_k7_partc_pdf(db_path=DB_FILE, out_path=None, student_status="both",
     scale = usable_w_mm / sum(raw_widths)
     col_widths = [w * scale * mm for w in raw_widths]
 
-    out_path = out_path or "K7_PartC_Report.pdf"
+    out_path = out_path or f"K7_PartC_Report{status_file_suffix(student_status)}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
                              leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
                              topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
@@ -4181,7 +4291,7 @@ def generate_k7_partc_pdf(db_path=DB_FILE, out_path=None, student_status="both",
         included_semesters.append(sem_label)
 
         story.extend(build_k7c_heading_flowables(sem_label, db_path))
-        status_note = {"regular": " (Regular)", "ex": " (EX)", "both": ""}.get(student_status, "")
+        status_note = status_note_text(student_status)
         story.append(Paragraph(f"{sem_label.title()}{status_note}", styles["Heading3"]))
         story.append(Spacer(1, 3))
         gap_style = styles["Normal"].clone("k7cgap")
@@ -4235,15 +4345,56 @@ def generate_k7_partc_pdf(db_path=DB_FILE, out_path=None, student_status="both",
     return out_path
 
 
-def init_seating_db(db_path=SEATING_DB_FILE):
-    """Create the Seating Chart's OWN database (if it doesn't exist yet)
-    and its one table. Deliberately separate from init_db()/DB_FILE --
-    seating_chart data is shared across every scheme (it's what scheme
-    detection itself is built from), so it can never live inside any one
-    scheme's own per-scheme database. See SEATING_DB_FILE's definition
-    above for the full reasoning.
+def seating_chart_db_path(institute, program, year, session, base_dir="."):
+    """Computes (but does not create) THIS (institute, program, year,
+    session)'s own seating chart database path -- a sibling of that same
+    session's Scheme.db files (see scheme_db_path()), e.g.
+    "ABC_Polytechnic/2025_2026/Computer_Engineering/odd/seating_chart.db"
+    sitting right next to "K.db"/"I.db" in that same folder.
+
+    This is a deliberate change from the earlier design (one single
+    seating_chart.db shared across every institute/department/year/
+    session in the whole system): a shared file meant every department's
+    -- and even one department's different years'/sessions' -- roster
+    data lived in one undifferentiated pool, filtered only by
+    institute+department columns inside the table. That's a real
+    collision risk (a semester_label or enrollment number repeating
+    across different years/sessions) and, worse, meant Report mode's
+    seating-chart-derived checks (status confirmation, the "missing
+    enrollment" gap warning) could only be scoped down to
+    institute+department, never further -- see the K-scheme/I-scheme
+    cross-contamination bug this fixes: pull up I-scheme's report and it
+    would warn about "missing" enrollments that were actually K-scheme's
+    the whole time, since both schemes' rows lived in the same
+    institute+department pool with no session/scheme-level boundary
+    between them in that lookup.
+
+    Now, each (institute, program, year, session) gets its OWN file --
+    the same guarantee scheme databases already have. A scheme letter is
+    NOT part of this path (unlike scheme_db_path()) because one seating
+    chart paste legitimately contains MULTIPLE schemes at once -- that's
+    the entire mechanism scheme detection is built on. Scheme-level
+    separation within this one file is handled by filtering on the
+    'scheme' column, not by further splitting the file (see
+    ACTIVE_SCHEME in _compute_student_status_full()/
+    compute_seating_chart_gap()).
     """
-    conn = sqlite3.connect(db_path)
+    department_folder = get_department_folder(institute, program, year, base_dir)
+    session_s = sanitize_path_component(session).lower()
+    return os.path.join(department_folder, session_s, "seating_chart.db")
+
+
+def ensure_seating_chart_db(institute, program, year, session, base_dir="."):
+    """Computes this (institute, program, year, session)'s seating chart
+    path (see seating_chart_db_path()) and creates its parent folder and
+    table if this is the first time -- idempotent, safe to call on every
+    save. Returns the path either way.
+    """
+    path = seating_chart_db_path(institute, program, year, session, base_dir)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    conn = sqlite3.connect(path)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS seating_chart (
             enrollment TEXT NOT NULL,
@@ -4256,15 +4407,9 @@ def init_seating_db(db_path=SEATING_DB_FILE):
             UNIQUE(enrollment, semester_label, scheme)
         )
     """)
-    # Migration: a seating_chart table created before 'scheme' existed --
-    # add the column (existing rows default to scheme='K', since K-scheme
-    # was the only one in use before this change).
-    existing_seating_cols = {row[1] for row in conn.execute("PRAGMA table_info(seating_chart)")}
-    if "scheme" not in existing_seating_cols:
-        conn.execute("ALTER TABLE seating_chart ADD COLUMN scheme TEXT")
-        conn.execute("UPDATE seating_chart SET scheme = 'K' WHERE scheme IS NULL")
     conn.commit()
     conn.close()
+    return path
 
 
 def init_db(db_path=DB_FILE):
@@ -4278,9 +4423,10 @@ def init_db(db_path=DB_FILE):
     actually varies per student -- identity fields, obtained_marks, summary fields -- goes
     into `student_records`, once per enrollment.
 
-    NOTE: does NOT create seating_chart -- that table lives only in
-    SEATING_DB_FILE, via init_seating_db(). A per-scheme database
-    created by this function has no seating_chart table at all.
+    NOTE: does NOT create seating_chart -- that table lives only in each
+    (institute, program, year, session)'s own seating chart file, via
+    ensure_seating_chart_db(). A per-scheme database created by this
+    function has no seating_chart table at all.
     """
     conn = sqlite3.connect(db_path)
     conn.execute("""
@@ -4524,6 +4670,32 @@ def init_db(db_path=DB_FILE):
             present_semester TEXT NOT NULL,
             missing_semester TEXT NOT NULL,
             UNIQUE(enrollment, missing_semester)
+        )
+    """)
+    # --- Departmental Report setup (all per scheme, since this IS the scheme's own database) ---
+    # User-defined result classes (FIRST CLASS, ATKT, FAIL, ...). counts_pass = "counts toward Total Pass".
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dept_result_classes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            counts_pass INTEGER NOT NULL DEFAULT 0,
+            sort_order INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    # Every unique raw Result text -> the class it is grouped under.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dept_result_mapping (
+            result_text TEXT PRIMARY KEY,
+            class_id INTEGER NOT NULL
+        )
+    """)
+    # Enrolled students, per semester AND per raw seating-chart category.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dept_enrolled (
+            semester_label TEXT NOT NULL,
+            category TEXT NOT NULL,
+            enrolled INTEGER NOT NULL,
+            UNIQUE(semester_label, category)
         )
     """)
     conn.commit()
@@ -6120,8 +6292,8 @@ def generate_semester_pdf(semester_label, db_path=DB_FILE, out_path=None, studen
             obtained_by_enr_cell.setdefault(rec["enrollment"], {})[(rec["abs_row"], rec["abs_col"])] = rec["value"]
 
     enrollments = sorted({r["enrollment"] for r in sem_records if r["enrollment"]})
-    if student_status in ("regular", "ex"):
-        wanted = "Regular" if student_status == "regular" else "EX"
+    wanted = resolve_status_filter(student_status)
+    if wanted is not None:
         enrollments = [enr for enr in enrollments if status_map.get((enr, semester_label)) == wanted]
         if not enrollments:
             print(f"No '{wanted}' enrollments found for '{semester_label}' in {db_path}.")
@@ -6211,7 +6383,7 @@ def generate_semester_pdf(semester_label, db_path=DB_FILE, out_path=None, studen
     def abbr(v):
         return ABBR.get(str(v).strip().upper(), v)
 
-    status_suffix = {"regular": "_Regular", "ex": "_EX", "both": ""}.get(student_status, "")
+    status_suffix = status_file_suffix(student_status)
     out_path = out_path or f"{semester_label.title().replace(' ', '_')}_Report{status_suffix}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=page_size,
                              leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
@@ -6432,6 +6604,58 @@ def _record_scheme_letter(rec):
     return SCHEME_ID_TO_LETTER.get(scheme_id, "K")
 
 
+def normalize_status_code(raw):
+    """One seating-chart 'Regular/EX' cell -> its category: EXACTLY the value typed
+    in that column (trimmed only). 'R' stays 'R', 'X' stays 'X', 'OTO' stays 'OTO';
+    no conversion, no case change, no merging. Blank -> None."""
+    t = (raw or "").strip()
+    return t or None
+
+
+def resolve_status_filter(student_status):
+    """Report filter -> the exact category value to keep (as it appears in the seating
+    chart column), or None meaning 'All combined' ('both' / 'all' / blank)."""
+    if student_status in (None, "", "both", "all"):
+        return None
+    return student_status
+
+
+def status_note_text(student_status):
+    """' (OTO)' for a category filter, '' for All combined -- used in report headings."""
+    wanted = resolve_status_filter(student_status)
+    return f" ({wanted})" if wanted else ""
+
+
+def status_file_suffix(student_status):
+    """'_OTO' for a category filter, '' for All combined -- used in PDF file names."""
+    wanted = resolve_status_filter(student_status)
+    if not wanted:
+        return ""
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", wanted).strip("_")
+    return f"_{safe}" if safe else ""
+
+
+def order_categories(categories):
+    """Unique category values, alphabetical (case-insensitive, then exact)."""
+    return sorted(set(categories), key=lambda c: (c.lower(), c))
+
+
+def list_report_categories(db_path=DB_FILE):
+    """The categories for the ACTIVE scheme = the unique values found in the seating
+    chart's Regular/EX column for that scheme, exactly as typed."""
+    found = set()
+    if ACTIVE_SEATING_DB_FILE and os.path.exists(ACTIVE_SEATING_DB_FILE):
+        conn = sqlite3.connect(ACTIVE_SEATING_DB_FILE)
+        try:
+            for (s,) in conn.execute("SELECT DISTINCT status FROM seating_chart WHERE scheme = ?", (ACTIVE_SCHEME,)):
+                if s:
+                    found.add(s)
+        except sqlite3.OperationalError:
+            pass
+        conn.close()
+    return order_categories(found)
+
+
 def _compute_student_status_full(all_extracted, db_path=DB_FILE):
     """Shared engine behind compute_student_status() and
     compute_student_status_sources() -- the LABELED HYBRID. Internally
@@ -6445,14 +6669,18 @@ def _compute_student_status_full(all_extracted, db_path=DB_FILE):
     triple; only where no seating chart row exists does this fall back
     to the inferred rule.
 
-    NOTE: the seating chart itself is ALWAYS read from SEATING_DB_FILE,
-    never from `db_path` -- seating chart data is shared across every
-    scheme, not scoped to whichever scheme's operational database
-    `db_path` currently points at (see SEATING_DB_FILE's definition).
-    `db_path` (the caller's currently-active scheme database) is only
-    used below for the inferred-fallback step, which reads
-    `all_extracted` -- already loaded by the caller -- not the database
-    directly.
+    NOTE: the seating chart itself is ALWAYS read from
+    ACTIVE_SEATING_DB_FILE -- this scheme's own (institute, program,
+    year, session) seating chart file, never from `db_path` (this
+    scheme's operational database -- a different file entirely; see
+    seating_chart_db_path() vs. scheme_db_path()). It's additionally
+    filtered by ACTIVE_SCHEME, since one seating chart file legitimately
+    holds multiple schemes' rows together (that's how scheme detection
+    works) -- without this filter, scheme I's status lookups would see
+    scheme K's rows too. `db_path` (the caller's currently-active scheme
+    database) is only used below for the inferred-fallback step, which
+    reads `all_extracted` -- already loaded by the caller -- not the
+    database directly.
 
     The RETURNED result is then collapsed down to (enrollment,
     semester_label) -- scheme dropped entirely -- since nothing outside
@@ -6470,15 +6698,18 @@ def _compute_student_status_full(all_extracted, db_path=DB_FILE):
 
     by_triple = {}
 
-    # 1) Seating chart -- authoritative wherever present. Always read
-    # from the shared SEATING_DB_FILE, never from db_path.
+    # 1) Seating chart -- authoritative wherever present. Reads THIS
+    # scheme's own seating chart file (ACTIVE_SEATING_DB_FILE), filtered
+    # to THIS scheme specifically (ACTIVE_SCHEME) since K and I rows
+    # still coexist within that one file.
     chart_rows = []
-    if os.path.exists(SEATING_DB_FILE):
-        conn = sqlite3.connect(SEATING_DB_FILE)
+    if ACTIVE_SEATING_DB_FILE and os.path.exists(ACTIVE_SEATING_DB_FILE):
+        conn = sqlite3.connect(ACTIVE_SEATING_DB_FILE)
         conn.row_factory = sqlite3.Row
         try:
             chart_rows = conn.execute(
-                "SELECT enrollment, semester_label, scheme, status FROM seating_chart"
+                "SELECT enrollment, semester_label, scheme, status FROM seating_chart WHERE scheme = ?",
+                (ACTIVE_SCHEME,),
             ).fetchall()
         except sqlite3.OperationalError:
             chart_rows = []  # table doesn't exist yet
@@ -6486,26 +6717,8 @@ def _compute_student_status_full(all_extracted, db_path=DB_FILE):
     for r in chart_rows:
         by_triple[(r["enrollment"], r["semester_label"], r["scheme"])] = {"status": r["status"], "source": "chart"}
 
-    # 2) Inferred fallback -- grouped by (enrollment, scheme), only for
-    # triples the seating chart doesn't cover.
-    sems_by_enr_scheme = {}
-    for r in all_extracted:
-        enr = r["enrollment"]
-        if not enr:
-            continue
-        scheme = _record_scheme_letter(r)
-        sems_by_enr_scheme.setdefault((enr, scheme), set()).add(r["semester_label"])
-
-    for (enr, scheme), sems in sems_by_enr_scheme.items():
-        highest = max(sems, key=sem_rank)
-        for sem in sems:
-            key = (enr, sem, scheme)
-            if key in by_triple:
-                continue  # seating chart already answered this one
-            by_triple[key] = {
-                "status": "Regular" if sem == highest else "EX",
-                "source": "inferred",
-            }
+    # 2) No guessing: a student with marks data but no seating-chart row has NO
+    # category. They are included in 'All combined' reports only.
 
     # Collapse scheme out of the key -- chart-sourced wins over inferred
     # if the same (enrollment, semester_label) somehow appears under
@@ -6590,11 +6803,17 @@ def parse_seating_chart_rows(text):
     return parse_pasted_grid(text)
 
 
-def save_seating_chart_rows(rows, db_path=SEATING_DB_FILE):
+def save_seating_chart_rows(institute, program, year, session, rows):
     """Validates and upserts seating chart rows -- one row per
     (enrollment, semester_label, scheme), REPLACING any existing row for
-    that same triple (so re-pasting a corrected row updates it in place
-    rather than creating a duplicate or silently being ignored).
+    that same combination (so re-pasting a corrected row updates it in
+    place rather than creating a duplicate or silently being ignored).
+
+    Scoped to THIS (institute, program, year, session)'s own database
+    file (see seating_chart_db_path()/ensure_seating_chart_db()) -- a
+    different department, a different institute, or even the same
+    department's different year/session, all get their own separate
+    file, never mixing into a shared pool.
 
     Each row must have exactly 6 cells, in order: Enrollment Number,
     Student Name, Seat Number, Semester-Scheme code (e.g. "TX-4-K"),
@@ -6606,7 +6825,7 @@ def save_seating_chart_rows(rows, db_path=SEATING_DB_FILE):
     unrecognized Regular/EX letter is skipped and reported, never
     silently dropped or guessed at.
     """
-    init_seating_db(db_path)
+    db_path = ensure_seating_chart_db(institute, program, year, session)
     errors = []
     to_save = []  # (enrollment, semester_label, scheme, student_name, seat_number, status, subjects_appeared)
 
@@ -6618,7 +6837,6 @@ def save_seating_chart_rows(rows, db_path=SEATING_DB_FILE):
         student_name = (row[1] or "").strip()
         seat_number = (row[2] or "").strip()
         sem_scheme_raw = (row[3] or "").strip()
-        status_raw = (row[4] or "").strip().upper()
         subjects_appeared = (row[5] or "").strip()
 
         if not enrollment:
@@ -6630,12 +6848,10 @@ def save_seating_chart_rows(rows, db_path=SEATING_DB_FILE):
             errors.append(f"Row {r_i + 1}: semester-scheme code '{sem_scheme_raw}' -- {err} -- skipped")
             continue
 
-        if status_raw not in ("R", "X"):
-            errors.append(
-                f"Row {r_i + 1}: Regular/EX must be 'R' or 'X', found '{row[4]}' -- skipped"
-            )
+        status = normalize_status_code(row[4])
+        if status is None:
+            errors.append(f"Row {r_i + 1}: blank Regular/EX category -- skipped")
             continue
-        status = "Regular" if status_raw == "R" else "EX"
 
         to_save.append((enrollment, semester_label, scheme, student_name, seat_number, status, subjects_appeared))
 
@@ -6654,10 +6870,13 @@ def save_seating_chart_rows(rows, db_path=SEATING_DB_FILE):
     return len(to_save), errors
 
 
-def list_active_schemes(db_path=SEATING_DB_FILE):
-    """Distinct scheme letters ('K', 'I', ...) currently present in the
-    seating chart -- this IS the set that drives the global scheme
-    selector checkboxes in app.py and every downstream schemewise mode."""
+def list_active_schemes(institute, program, year, session):
+    """Distinct scheme letters ('K', 'I', ...) currently present in THIS
+    (institute, program, year, session)'s own seating chart file -- this
+    IS the set that drives Seating Chart's per-scheme breakdown and
+    every downstream schemewise mode. Scoped so one department never
+    sees another's (or another institute's) scheme letters."""
+    db_path = seating_chart_db_path(institute, program, year, session)
     if not os.path.exists(db_path):
         return []
     conn = sqlite3.connect(db_path)
@@ -6671,14 +6890,15 @@ def list_active_schemes(db_path=SEATING_DB_FILE):
     return sorted(r[0] for r in rows)
 
 
-def compute_train_sample_enrollments(scheme, db_path=SEATING_DB_FILE):
-    """For ONE scheme, finds the SMALLEST set of enrollment numbers
-    (from that scheme's seating chart data) whose combined semester
-    coverage spans every semester the scheme actually has -- e.g. if
-    enrollment 1234 appears in the seating chart for semesters
-    1/2/3/4 and enrollment 5678 appears for 5/6, {1234, 5678} covers
-    every semester with just 2 enrollments, so Train mode doesn't need
-    a sample per semester, just enough samples to touch every one.
+def compute_train_sample_enrollments(institute, program, year, session, scheme):
+    """For ONE scheme, within ONE (institute, program, year, session),
+    finds the SMALLEST set of enrollment numbers (from that scheme's
+    seating chart data) whose combined semester coverage spans every
+    semester the scheme actually has -- e.g. if enrollment 1234 appears
+    in the seating chart for semesters 1/2/3/4 and enrollment 5678
+    appears for 5/6, {1234, 5678} covers every semester with just 2
+    enrollments, so Train mode doesn't need a sample per semester, just
+    enough samples to touch every one.
 
     This is the classic Minimum Set Cover problem (NP-hard exactly),
     solved here with the standard GREEDY approximation: repeatedly pick
@@ -6697,15 +6917,18 @@ def compute_train_sample_enrollments(scheme, db_path=SEATING_DB_FILE):
     this list -- i.e. why this enrollment was chosen. Empty list if this
     scheme has no seating chart data.
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute(
-            "SELECT enrollment, semester_label FROM seating_chart WHERE scheme = ?", (scheme,)
-        ).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.close()
+    db_path = seating_chart_db_path(institute, program, year, session)
+    rows = []
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT enrollment, semester_label FROM seating_chart WHERE scheme = ?", (scheme,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        conn.close()
     if not rows:
         return []
 
@@ -6746,18 +6969,74 @@ def compute_train_sample_enrollments(scheme, db_path=SEATING_DB_FILE):
     return selected
 
 
-def wipe_seating_chart_data(db_path=SEATING_DB_FILE):
-    """Deletes every row from seating_chart -- a full wipe, independent
-    of any other table (student_records, subjectwise_student_records,
-    canonical_marks, yearly_gap_flags are all untouched). Returns the
-    number of rows deleted."""
+def delete_scheme_declarations(institute, program, year, session, db_path=SEATING_DB_FILE):
+    """Removes every scheme declaration (paste- or manually-declared) for ONE
+    (institute, program, year, session). Without this, the sidebar's Active
+    Scheme list keeps showing a sitting whose seating chart was deleted.
+    Per-scheme result databases (K.db etc.) are NOT touched."""
     if not os.path.exists(db_path):
         return 0
     conn = sqlite3.connect(db_path)
-    count = conn.execute("SELECT COUNT(*) FROM seating_chart").fetchone()[0]
-    conn.execute("DELETE FROM seating_chart")
-    conn.commit()
+    try:
+        cur = conn.execute(
+            "DELETE FROM scheme_declarations WHERE institute = ? AND program = ? AND year = ? AND session = ?",
+            (sanitize_path_component(institute), sanitize_path_component(program),
+             sanitize_path_component(year), sanitize_path_component(session).lower()),
+        )
+        n = cur.rowcount
+        conn.commit()
+    except sqlite3.OperationalError:
+        n = 0
     conn.close()
+    return n
+
+
+def delete_sitting_scheme_files(institute, program, year, session, base_dir="."):
+    """Deletes every scheme result database (K.db, I.db, ...) and every
+    <Scheme>_layout_mapping.json inside THIS (institute, program, year, session)
+    folder -- never another sitting's, department's or institute's. The
+    seating_chart.db there is removed by wipe_seating_chart_data(). The
+    year-level reports/ folder is shared by both sessions and is left alone.
+    Removes the session folder too if it ends up empty.
+    Returns the list of file names deleted."""
+    folder = os.path.dirname(seating_chart_db_path(institute, program, year, session, base_dir))
+    deleted = []
+    if not os.path.isdir(folder):
+        return deleted
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path) and (name.lower().endswith(".db") or name.endswith("_layout_mapping.json")):
+            try:
+                os.remove(path)
+                deleted.append(name)
+            except OSError:
+                pass
+    try:
+        os.rmdir(folder)
+    except OSError:
+        pass
+    return deleted
+
+
+def wipe_seating_chart_data(institute, program, year, session):
+    """Deletes THIS (institute, program, year, session)'s ENTIRE sitting: the
+    seating chart file, its scheme declarations, and every scheme result
+    database / layout mapping in that session folder (see
+    delete_sitting_scheme_files()). Never touches another department's,
+    institute's, or the same department's other year/session.
+    Returns the number of seating rows that existed (0 if no file)."""
+    db_path = seating_chart_db_path(institute, program, year, session)
+    count = 0
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM seating_chart").fetchone()[0]
+        except sqlite3.OperationalError:
+            count = 0
+        conn.close()
+        os.remove(db_path)
+    delete_scheme_declarations(institute, program, year, session)
+    delete_sitting_scheme_files(institute, program, year, session)
     return count
 
 
@@ -6804,18 +7083,23 @@ def delete_result_semesters(enrollment, semester_labels, db_path=DB_FILE):
 
 def compute_seating_chart_gap(semester_labels, student_status, present_enrollments):
     """Compares who a report is ABOUT TO SHOW against who the seating
-    chart says should exist for that same semester(s)+status scope --
-    catching exactly the "56 in the seating chart but only 55 in the
-    report" gap: an enrollment the seating chart lists, but for which no
-    marks data ever got Trained/Extracted/Offline-imported, so it never
-    made it into the report's own student list at all. Scheme is not
-    part of this scope any more -- every seating-chart row for this
-    semester+status counts, regardless of which scheme it came from.
+    chart says should exist for that same semester(s)+status+SCHEME
+    scope -- catching exactly the "56 in the seating chart but only 55
+    in the report" gap: an enrollment the seating chart lists (under
+    THIS scheme), but for which no marks data ever got Trained/
+    Extracted/Offline-imported, so it never made it into the report's
+    own student list at all.
 
-    Always reads the seating chart from SEATING_DB_FILE -- the shared
-    file, never whichever scheme's operational database the caller
-    happens to be working against (see SEATING_DB_FILE's definition).
-    That's why this function takes no db_path parameter at all.
+    Always reads from ACTIVE_SEATING_DB_FILE -- this scheme's own
+    (institute, program, year, session) seating chart file (see
+    seating_chart_db_path()), never whichever scheme's OPERATIONAL
+    database the caller happens to be working against (a different file
+    entirely). That's why this function takes no db_path parameter at
+    all. It's ALSO filtered by ACTIVE_SCHEME: one seating chart file
+    legitimately holds multiple schemes' rows together (that's how
+    scheme detection works), so without this filter, scheme I's gap
+    check would flag scheme K's enrollments as "missing" from an I-
+    scheme report -- exactly the bug this scoping fixes.
 
     semester_labels: list of semester_label strings this report's scope
         covers (usually one; a Yearly-scoped report passes several).
@@ -6831,22 +7115,23 @@ def compute_seating_chart_gap(semester_labels, student_status, present_enrollmen
     sorted by semester then enrollment, empty if nothing's missing.
     """
     rows = []
-    if os.path.exists(SEATING_DB_FILE):
-        conn = sqlite3.connect(SEATING_DB_FILE)
+    if ACTIVE_SEATING_DB_FILE and os.path.exists(ACTIVE_SEATING_DB_FILE):
+        conn = sqlite3.connect(ACTIVE_SEATING_DB_FILE)
         conn.row_factory = sqlite3.Row
         try:
             rows = conn.execute(
-                "SELECT enrollment, semester_label, student_name, seat_number, status FROM seating_chart"
+                "SELECT enrollment, semester_label, student_name, seat_number, status FROM seating_chart "
+                "WHERE scheme = ?",
+                (ACTIVE_SCHEME,),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
         conn.close()
 
-    wanted_statuses = {
-        "regular": {"Regular"}, "ex": {"EX"}, "both": {"Regular", "EX"},
-    }.get(student_status, {"Regular", "EX"})
+    wanted_status = resolve_status_filter(student_status)
     sem_set = set(semester_labels)
-    scoped = [r for r in rows if r["semester_label"] in sem_set and r["status"] in wanted_statuses]
+    scoped = [r for r in rows if r["semester_label"] in sem_set
+              and (wanted_status is None or r["status"] == wanted_status)]
 
     missing = [
         {
@@ -6905,91 +7190,1320 @@ def _report_seating_gap_lines(semester_labels, student_status, db_path=DB_FILE):
     all_extracted, _ = load_all_records_from_db(db_path)
     sem_set = set(semester_labels)
     present_enr = {r["enrollment"] for r in all_extracted if r["semester_label"] in sem_set and r["enrollment"]}
-    if student_status in ("regular", "ex"):
+    wanted = resolve_status_filter(student_status)
+    if wanted is not None:
         status_map = compute_student_status(all_extracted, db_path)
-        wanted = "Regular" if student_status == "regular" else "EX"
         present_enr = {e for e in present_enr if any(status_map.get((e, s)) == wanted for s in semester_labels)}
     gap = compute_seating_chart_gap(semester_labels, student_status, present_enr)
     return seating_chart_gap_note_lines(gap)
 
 
-def get_seating_chart_summary(db_path=SEATING_DB_FILE):
-    """Per-SCHEME semester-wise + grand-total Regular/EX counts (every
-    enrollment+semester+scheme row counts separately -- the same student
-    appearing in 3 semesters counts 3 times, and a student appearing
-    under two different schemes counts once per scheme), plus per-scheme
-    per-semester student lists (for the drill-down view) and per-scheme
-    sorted UNIQUE enrollment lists (for feeding into that scheme's Train
-    mode).
+def get_seating_chart_summary(institute, program, year, session):
+    """Per-SCHEME, per-CATEGORY semester-wise + grand-total counts (every
+    enrollment+semester+scheme row counts separately), plus per-semester student
+    lists per category and a sorted UNIQUE enrollment list per scheme. Categories
+    are the unique values in the seating chart's Regular/EX column, exactly as typed.
 
-    Returns {"schemes": [scheme, ...], "by_scheme": {scheme: {
-        "by_semester": [{"semester_label","regular_count","ex_count",
-            "total_count","regular_students","ex_students"}, ...],
-        "grand_total": {"regular_count","ex_count","total_count"},
-        "unique_enrollments": [enrollment, ...],
-    }}}
-    Each student entry in regular_students/ex_students is
-    {"enrollment","student_name","seat_number"}. Empty ("schemes": [],
-    "by_scheme": {}) if no seating chart data exists yet.
+    Returns {"schemes": [...], "by_scheme": {scheme: {
+        "categories": [...],
+        "by_semester": [{"semester_label", "counts": {cat: n}, "students": {cat: [..]},
+                         "total_count"}, ...],
+        "grand_total": {"counts": {cat: n}, "total_count"},
+        "unique_enrollments": [...]}}}
     """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute("""
-            SELECT enrollment, semester_label, scheme, student_name, seat_number, status
-            FROM seating_chart
-        """).fetchall()
-    except sqlite3.OperationalError:
-        rows = []
-    conn.close()
+    db_path = seating_chart_db_path(institute, program, year, session)
+    rows = []
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("""
+                SELECT enrollment, semester_label, scheme, student_name, seat_number, status
+                FROM seating_chart
+            """).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        conn.close()
 
     schemes = sorted({r["scheme"] for r in rows if r["scheme"]})
     by_scheme = {}
 
     for scheme in schemes:
         scheme_rows = [r for r in rows if r["scheme"] == scheme]
+        categories = order_categories({r["status"] for r in scheme_rows})
         by_sem = {}
         unique_enrollments = set()
         for r in scheme_rows:
             unique_enrollments.add(r["enrollment"])
-            sem = r["semester_label"]
-            bucket = by_sem.setdefault(sem, {"regular_students": [], "ex_students": []})
             entry = {
                 "enrollment": r["enrollment"], "student_name": r["student_name"] or "",
                 "seat_number": r["seat_number"] or "",
             }
-            if r["status"] == "Regular":
-                bucket["regular_students"].append(entry)
-            else:
-                bucket["ex_students"].append(entry)
+            by_sem.setdefault(r["semester_label"], {}).setdefault(r["status"], []).append(entry)
 
         by_semester = []
-        grand_regular = grand_ex = 0
+        grand = {c: 0 for c in categories}
         for sem in SEMESTER_NAMES:
             if sem not in by_sem:
                 continue
-            regular_students = sorted(by_sem[sem]["regular_students"], key=lambda x: x["enrollment"])
-            ex_students = sorted(by_sem[sem]["ex_students"], key=lambda x: x["enrollment"])
-            regular_count = len(regular_students)
-            ex_count = len(ex_students)
-            grand_regular += regular_count
-            grand_ex += ex_count
+            students = {c: sorted(by_sem[sem].get(c, []), key=lambda x: x["enrollment"]) for c in categories}
+            counts = {c: len(students[c]) for c in categories}
+            for c in categories:
+                grand[c] += counts[c]
             by_semester.append({
-                "semester_label": sem, "regular_count": regular_count, "ex_count": ex_count,
-                "total_count": regular_count + ex_count,
-                "regular_students": regular_students, "ex_students": ex_students,
+                "semester_label": sem, "counts": counts, "students": students,
+                "total_count": sum(counts.values()),
             })
 
         by_scheme[scheme] = {
+            "categories": categories,
             "by_semester": by_semester,
             "grand_total": {
-                "regular_count": grand_regular, "ex_count": grand_ex,
-                "total_count": grand_regular + grand_ex,
+                "counts": grand, "total_count": sum(grand.values()),
             },
             "unique_enrollments": sorted(unique_enrollments),
         }
 
     return {"schemes": schemes, "by_scheme": by_scheme}
+
+
+# ==========================================================
+# INSTITUTE-LEVEL SEATING CHART -- completely separate from Department
+# Seating Chart above. No shared code, no shared storage, no shared
+# database, no relation of any kind. This exists purely as an
+# institute admin's own reference/record-keeping tool -- nothing
+# downstream (Train, Extract, Course Codes, Recheck, Offline Import,
+# Report, or the Global Scheme Group's database-scoping mechanism at
+# all) ever reads from this. It has no scheme databases, no
+# scheme_declarations, no radio picker -- it is just: paste data in,
+# see a parsed table out.
+# ==========================================================
+
+def parse_institute_semester_scheme_code(raw):
+    """Parses the composite semester-scheme cell for INSTITUTE-level
+    Seating Chart specifically, e.g. "TX-4-K", into (program_code,
+    semester_label, scheme_letter, error). Format is P-N-S, split on '-'
+    from the left:
+        segment 1 ("TX")  -- PROGRAM CODE -- kept and returned, unlike
+                              Department Seating Chart's
+                              parse_semester_scheme_code() (which
+                              discards this segment, since one
+                              department's paste is always one program
+                              and the segment is redundant there). At
+                              Institute level, one paste can span
+                              MULTIPLE programs at once, so this segment
+                              is exactly what distinguishes them.
+        segment 2 ("4")   -- semester number, 1-6
+        segment 3 ("K")   -- scheme letter (see SCHEME_LETTER_MAP)
+
+    Returns (program_code, semester_label, scheme_letter, None) on
+    success, or (None, None, None, error_message) on failure.
+    scheme_letter is returned upper-cased (e.g. "K", "I"). program_code
+    is returned upper-cased too, for consistent display/grouping later.
+
+    This is a DELIBERATELY SEPARATE function from
+    parse_semester_scheme_code() -- Department Seating Chart's parser is
+    never touched or reused here, so its behavior can't be affected by
+    anything built for Institute-level Seating Chart.
+    """
+    text = (raw or "").strip()
+    parts = text.split("-")
+    if len(parts) < 3:
+        return None, None, None, f"expected 'P-N-S' format (e.g. 'TX-4-K'), found '{raw}'"
+    program_part, sem_part, scheme_part = parts[0].strip().upper(), parts[1].strip(), parts[2].strip().upper()
+    if not program_part:
+        return None, None, None, f"program code segment is blank in '{raw}'"
+    try:
+        sem_num = int(float(sem_part))
+    except (ValueError, TypeError):
+        return None, None, None, f"semester segment must be a number 1-{len(SEMESTER_NAMES)}, found '{sem_part}'"
+    if not (1 <= sem_num <= len(SEMESTER_NAMES)):
+        return None, None, None, f"semester segment must be 1-{len(SEMESTER_NAMES)}, found '{sem_num}'"
+    if scheme_part not in SCHEME_LETTER_MAP:
+        return None, None, None, f"unrecognized scheme letter '{scheme_part}' (known: {', '.join(SCHEME_LETTER_MAP)})"
+    return program_part, SEMESTER_NAMES[sem_num - 1], scheme_part, None
+
+
+def parse_institute_seating_chart_rows(text):
+    """Splits a block of text copy-pasted from MSBTE's seating chart
+    Excel into rows of cells -- reuses the same generic, low-level
+    tab-separated clipboard parsing (parse_pasted_grid()) that
+    Department Seating Chart's own parse_seating_chart_rows() also
+    calls, since that's a shared, non-department-specific text utility
+    -- not a hook into anything department-owned. Column 4 is still the
+    raw composite semester-scheme text (e.g. "TX-4-K") at this point --
+    it gets split into program_code + semester_label + scheme in
+    save_institute_seating_chart_rows() via
+    parse_institute_semester_scheme_code(), the 3-way split unique to
+    Institute-level Seating Chart.
+    """
+    return parse_pasted_grid(text)
+
+
+def institute_seating_chart_db_path(institute, year, session, base_dir="."):
+    """Computes (but does not create) the Institute-level Seating
+    Chart's database path -- <base_dir>/<Institute>/<Year>/<Session>/
+    institute_seating_chart.db. Session (Odd/Even) is now its OWN folder
+    level (Plan 1 revision), not just a column -- this is what lets an
+    existing database be found/reused via a Year+Session picker instead
+    of re-entering the seating chart columns every time. NOT nested
+    inside any department's folder, and not a sibling of any
+    department's own seating_chart.db either. Pure function -- no
+    filesystem access.
+    """
+    institute_s = sanitize_path_component(institute)
+    year_s = sanitize_path_component(year)
+    session_s = sanitize_path_component(session).lower()
+    return os.path.join(base_dir, institute_s, year_s, session_s, "institute_seating_chart.db")
+
+
+def ensure_institute_seating_chart_db(institute, year, session, base_dir="."):
+    """Computes this institute+year+session's Institute Seating Chart
+    path (see institute_seating_chart_db_path()) and creates its parent
+    folder and tables if this is the first time -- idempotent, safe to
+    call on every save. Returns the path either way.
+
+    Two tables: the main institute_seating_chart row per
+    (enrollment, semester_label, scheme), and
+    institute_seating_chart_subjects, which holds that row's Appeared
+    Subjects broken into structured (subject_code, level1, level2)
+    triples (Plan 1's subject-structure requirement) -- kept alongside
+    the original flat subjects_appeared text (never discarded), so nothing
+    downstream needs to re-parse that text to get the structured form.
+    """
+    path = institute_seating_chart_db_path(institute, year, session, base_dir)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS institute_seating_chart (
+            enrollment TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            program_code TEXT NOT NULL,
+            student_name TEXT,
+            seat_number TEXT,
+            status TEXT NOT NULL,
+            subjects_appeared TEXT,
+            UNIQUE(enrollment, semester_label, scheme)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS institute_seating_chart_subjects (
+            enrollment TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            subject_code TEXT NOT NULL,
+            level1 TEXT NOT NULL,
+            level2 TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS parent_child_subjects (
+            program_code TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            parent_subject TEXT NOT NULL,
+            parent_level1 TEXT NOT NULL,
+            parent_level2 TEXT NOT NULL,
+            child_subject TEXT NOT NULL,
+            UNIQUE(program_code, semester_label, scheme, parent_subject, parent_level1, parent_level2, child_subject)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS exam_dates (
+            date TEXT PRIMARY KEY,
+            day TEXT NOT NULL,
+            is_exam_day INTEGER NOT NULL DEFAULT 0,
+            num_sessions INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS exam_date_sessions (
+            date TEXT NOT NULL,
+            session_index INTEGER NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            UNIQUE(date, session_index)
+        )
+    """)
+    # Migration: databases created before Section 4 split each subject into
+    # one row PER BATCH (instead of one row with a Batch picker) have the
+    # OLD schedule_row_config schema (selected_batch_index, no batch_index
+    # in the key). This table only ever holds transient Workshop/Faculty
+    # text -- nothing a user would be upset to re-enter -- so old-schema
+    # tables are simply dropped and recreated below, rather than attempting
+    # a data-preserving migration.
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(schedule_row_config)").fetchall()}
+        if cols and "batch_index" not in cols:
+            conn.execute("DROP TABLE schedule_row_config")
+            cols = set()
+    except sqlite3.OperationalError:
+        cols = set()
+    # Migration: every raw category (not just R) now gets its own Workshop/
+    # Faculty row -- add the 'category' column and widen the UNIQUE key to
+    # include it. Existing rows (all entered against R before this change)
+    # become category='R'.
+    if cols and "category" not in cols:
+        conn.execute("ALTER TABLE schedule_row_config RENAME TO schedule_row_config_old")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS schedule_row_config (
+            program_code TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            level1 TEXT NOT NULL,
+            level2 TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'R',
+            batch_index INTEGER NOT NULL DEFAULT 0,
+            workshop_name TEXT NOT NULL DEFAULT '',
+            faculty_name TEXT NOT NULL DEFAULT '',
+            assigned_date TEXT NOT NULL DEFAULT '',
+            assigned_session_index INTEGER NOT NULL DEFAULT -1,
+            UNIQUE(program_code, semester_label, scheme, subject, level1, level2, category, batch_index)
+        )
+    """)
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schedule_row_config_old'"
+    ).fetchone():
+        conn.execute("""
+            INSERT OR IGNORE INTO schedule_row_config
+                (program_code, semester_label, scheme, subject, level1, level2, category, batch_index,
+                 workshop_name, faculty_name, assigned_date, assigned_session_index)
+            SELECT program_code, semester_label, scheme, subject, level1, level2, 'R', batch_index,
+                   workshop_name, faculty_name, assigned_date, assigned_session_index
+            FROM schedule_row_config_old
+        """)
+        conn.execute("DROP TABLE schedule_row_config_old")
+    # Migration: databases created before Day/Time assignment existed
+    # won't have these two columns yet.
+    for col_def in ("assigned_date TEXT NOT NULL DEFAULT ''", "assigned_session_index INTEGER NOT NULL DEFAULT -1"):
+        try:
+            conn.execute(f"ALTER TABLE schedule_row_config ADD COLUMN {col_def}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS other_category_schedule (
+            program_code TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            level1 TEXT NOT NULL,
+            level2 TEXT NOT NULL,
+            category TEXT NOT NULL,
+            batch_index INTEGER NOT NULL,
+            assigned_date TEXT NOT NULL DEFAULT '',
+            assigned_session_index INTEGER NOT NULL DEFAULT -1,
+            UNIQUE(program_code, semester_label, scheme, subject, level1, level2, category, batch_index)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS individual_fallback_schedule (
+            program_code TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            level1 TEXT NOT NULL,
+            level2 TEXT NOT NULL,
+            enrollment TEXT NOT NULL,
+            assigned_date TEXT NOT NULL,
+            assigned_session_index INTEGER NOT NULL,
+            UNIQUE(program_code, semester_label, scheme, subject, level1, level2, enrollment)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS semester_priority (
+            semester_label TEXT PRIMARY KEY,
+            priority INTEGER NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS subject_priority (
+            program_code TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            UNIQUE(program_code, semester_label, subject)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS faculty_availability (
+            faculty_name TEXT NOT NULL,
+            date TEXT NOT NULL,
+            session_index INTEGER NOT NULL,
+            UNIQUE(faculty_name, date, session_index)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pool_x_assignments (
+            program_code TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            level1 TEXT NOT NULL,
+            level2 TEXT NOT NULL,
+            enrollment TEXT NOT NULL,
+            assigned_batch_index INTEGER NOT NULL,
+            UNIQUE(program_code, semester_label, scheme, subject, level1, level2, enrollment)
+        )
+    """)
+    # Batches are now kept per category group ('R' = the batched category incl. its
+    # equivalents; any other raw category has its own batches). Older databases had
+    # no category column -- their batches were the Regular group, so they become 'R'.
+    _has_old = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='seat_number_batches'"
+    ).fetchone()
+    if _has_old:
+        _cols = {row[1] for row in conn.execute("PRAGMA table_info(seat_number_batches)").fetchall()}
+        if "category" not in _cols:
+            conn.execute("ALTER TABLE seat_number_batches RENAME TO seat_number_batches_old")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS seat_number_batches (
+            program_code TEXT NOT NULL,
+            semester_label TEXT NOT NULL,
+            scheme TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'R',
+            batch_index INTEGER NOT NULL,
+            start_seat INTEGER NOT NULL,
+            end_seat INTEGER NOT NULL,
+            UNIQUE(program_code, semester_label, scheme, category, batch_index)
+        )
+    """)
+    if conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='seat_number_batches_old'").fetchone():
+        conn.execute("""
+            INSERT OR IGNORE INTO seat_number_batches
+                (program_code, semester_label, scheme, category, batch_index, start_seat, end_seat)
+            SELECT program_code, semester_label, scheme, 'R', batch_index, start_seat, end_seat
+            FROM seat_number_batches_old
+        """)
+        conn.execute("DROP TABLE seat_number_batches_old")
+    # Manual date/time slot allocation (Practical Time Table Report -> Manual). Kept completely
+    # separate from the automatic assignments above; one row per schedulable unit.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS manual_schedule (
+            unit_key TEXT PRIMARY KEY,
+            assigned_date TEXT NOT NULL,
+            assigned_session_index INTEGER NOT NULL,
+            is_auto INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    # Migration: databases created before auto-fill existed have no is_auto column (their slots were all
+    # chosen by hand, so the default 0 = "chosen by the user" is exactly right).
+    try:
+        conn.execute("ALTER TABLE manual_schedule ADD COLUMN is_auto INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    # The last GENERATED Practical Time Table Report, one per mode ('auto' / 'manual'), kept exactly as
+    # generated until the user deliberately generates again (which replaces it).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS saved_timetable (
+            mode TEXT PRIMARY KEY,
+            generated_at TEXT NOT NULL,
+            level1_filter TEXT NOT NULL,
+            level2_filter TEXT NOT NULL,
+            rows_json TEXT NOT NULL,
+            unresolved_json TEXT NOT NULL,
+            signature TEXT NOT NULL
+        )
+    """)
+    # The last GENERATED Online Theory Time Table (one per Year/Session database): the user's settings, the
+    # table rows and the warnings, kept exactly as generated until the user deliberately generates again.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS saved_online_timetable (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            generated_at TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            rows_json TEXT NOT NULL,
+            warnings_json TEXT NOT NULL,
+            signature TEXT NOT NULL
+        )
+    """)
+    # Categories that count as 'R' (one-direction equivalence, whole Year+Session database).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS category_equivalence (
+            category TEXT PRIMARY KEY
+        )
+    """)
+    # Semester-wise date ranges: semesters that share a date range form one group, and the group has the
+    # per-date exam-day tick and session times (so the semesters of a group share common time slots).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS date_range_groups (
+            group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS date_range_group_semesters (
+            group_id INTEGER NOT NULL,
+            semester_label TEXT NOT NULL UNIQUE
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_dates (
+            group_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            day TEXT NOT NULL,
+            is_exam_day INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(group_id, date)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS group_date_sessions (
+            group_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            session_index INTEGER NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            UNIQUE(group_id, date, session_index)
+        )
+    """)
+    # One-time clearing: the old single "Exam Dates" list no longer has any meaning, and everything that was
+    # built on its dates (assigned day/time, manual slots, faculty availability ticks, saved practical time
+    # tables) is cleared with it. Workshop/Faculty entries, batches and priorities are kept. Runs only while
+    # old exam-date rows still exist, i.e. once.
+    try:
+        has_legacy = conn.execute("SELECT COUNT(*) FROM exam_dates").fetchone()[0]
+    except sqlite3.OperationalError:
+        has_legacy = 0
+    if has_legacy:
+        for stmt in (
+            "DELETE FROM exam_dates", "DELETE FROM exam_date_sessions", "DELETE FROM faculty_availability",
+            "UPDATE schedule_row_config SET assigned_date='', assigned_session_index=-1",
+            "DELETE FROM other_category_schedule", "DELETE FROM individual_fallback_schedule",
+            "DELETE FROM manual_schedule", "DELETE FROM saved_timetable",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
+    conn.commit()
+    conn.close()
+    return path
+
+
+def list_institute_seating_chart_dbs(institute, base_dir="."):
+    """Scans disk for every Year/Session this institute already has a
+    saved institute_seating_chart.db for -- the existing-database picker
+    (Plan 1): if a match is found, the user selects it instead of
+    re-entering the seating chart columns. Returns a list of
+    {"year", "session"} dicts (session Title-cased, e.g. "Odd"), sorted
+    by year then session. Pure filesystem scan -- no partial/garbage
+    folders are trusted unless the actual .db file is present.
+    """
+    institute_s = sanitize_path_component(institute)
+    inst_dir = os.path.join(base_dir, institute_s)
+    found = []
+    if not os.path.isdir(inst_dir):
+        return found
+    for year_s in sorted(os.listdir(inst_dir)):
+        year_path = os.path.join(inst_dir, year_s)
+        if not os.path.isdir(year_path):
+            continue
+        for session_s in sorted(os.listdir(year_path)):
+            session_path = os.path.join(year_path, session_s)
+            db_path = os.path.join(session_path, "institute_seating_chart.db")
+            if os.path.isfile(db_path):
+                found.append({"year": year_s, "session": session_s.capitalize()})
+    return found
+
+
+def list_department_seating_chart_dbs(institute, program, base_dir="."):
+    """Every sitting this department has: seating_chart.db files found at
+    <Institute>/<Year>/<Program>/<session>/seating_chart.db, PLUS sittings that
+    exist only as declared schemes (manual entry, no seating rows).
+    Returns [{"year", "session", "semesters": [...], "schemes": [...], "rows": int}, ...]."""
+    institute_s = sanitize_path_component(institute)
+    program_s = sanitize_path_component(program)
+    inst_dir = os.path.join(base_dir, institute_s)
+    found = {}
+    if os.path.isdir(inst_dir):
+        for year_s in sorted(os.listdir(inst_dir)):
+            prog_dir = os.path.join(inst_dir, year_s, program_s)
+            if not os.path.isdir(prog_dir):
+                continue
+            for session_s in sorted(os.listdir(prog_dir)):
+                db_path = os.path.join(prog_dir, session_s, "seating_chart.db")
+                if not os.path.isfile(db_path):
+                    continue
+                semesters, schemes, rows = [], [], 0
+                conn = sqlite3.connect(db_path)
+                try:
+                    semesters = [r[0] for r in conn.execute("SELECT DISTINCT semester_label FROM seating_chart")]
+                    schemes = sorted(r[0] for r in conn.execute("SELECT DISTINCT scheme FROM seating_chart"))
+                    rows = conn.execute("SELECT COUNT(*) FROM seating_chart").fetchone()[0]
+                except sqlite3.OperationalError:
+                    pass
+                conn.close()
+                semesters.sort(key=lambda s: SEMESTER_NAMES.index(s) if s in SEMESTER_NAMES else 999)
+                found[(year_s, session_s.lower())] = {
+                    "year": year_s, "session": session_s.capitalize(),
+                    "semesters": semesters, "schemes": schemes, "rows": rows}
+    for d in list_all_scheme_declarations(institute, program):
+        key = (d["year"], d["session"].lower())
+        entry = found.setdefault(key, {"year": d["year"], "session": d["session"].capitalize(),
+                                       "semesters": [], "schemes": [], "rows": 0})
+        if d["scheme"] not in entry["schemes"]:
+            entry["schemes"].append(d["scheme"])
+            entry["schemes"].sort()
+    return sorted(found.values(), key=lambda x: (x["year"], x["session"]))
+
+
+def get_institute_import_options(institute, year, session):
+    """What a department can import from ONE Institute Seating Chart sitting:
+    {program_code: [{"semester_label", "count", "schemes": [...]}, ...]} with
+    semesters in SEMESTER_NAMES order. Read-only."""
+    options = {}
+    for code in get_institute_seating_chart_program_codes(institute, year, session):
+        rows = get_institute_seating_chart_for_program(institute, year, session, code)
+        by_sem = {}
+        for r in rows:
+            e = by_sem.setdefault(r["semester_label"], {"count": 0, "schemes": set()})
+            e["count"] += 1
+            e["schemes"].add(r["scheme"])
+        options[code] = [
+            {"semester_label": s, "count": by_sem[s]["count"], "schemes": sorted(by_sem[s]["schemes"])}
+            for s in SEMESTER_NAMES if s in by_sem
+        ]
+    return options
+
+
+def import_department_seating_from_institute(institute, department, year, session, program_code, semester_labels):
+    """Copies one program code's rows (restricted to semester_labels) from the
+    Institute Seating Chart sitting (year, session) into THIS department's own
+    seating chart for the same year/session -- the same result as pasting those
+    rows in the department's Seating Chart screen. Re-importing replaces rows
+    with the same enrollment+semester+scheme. Also creates each imported
+    scheme's database and records its declaration, exactly like the paste path.
+    Reads the institute data only; never modifies it.
+    Returns (saved_count, errors, schemes)."""
+    wanted = set(semester_labels or [])
+    rows = get_institute_seating_chart_for_program(institute, year, session, program_code)
+    rows = [r for r in rows if r["semester_label"] in wanted]
+    if not rows:
+        return 0, ["Nothing to import for that Program Code / semester selection."], []
+
+    raw_rows = []
+    for r in rows:
+        sem_num = SEMESTER_NAMES.index(r["semester_label"]) + 1
+        raw_rows.append([
+            r["enrollment"], r["student_name"] or "", r["seat_number"] or "",
+            f"{program_code}-{sem_num}-{r['scheme']}", r["status"],
+            ", ".join("-".join(t) for t in r["subjects"]),
+        ])
+    saved, errors = save_seating_chart_rows(institute, department, year, session, raw_rows)
+    schemes = list_active_schemes(institute, department, year, session)
+    for scheme in schemes:
+        ensure_scheme_db(institute, department, year, session, scheme)
+        record_scheme_declaration(institute, department, year, session, scheme, source="institute")
+    return saved, errors, schemes
+
+
+def parse_appeared_subjects(raw):
+    """Splits ONE Appeared Subjects cell (e.g.
+    "FBT-TH-SA,FBT-TH-FA,MBO-PR-SA") into structured (subject_code,
+    level1, level2) triples. Every comma-separated entry must have
+    EXACTLY 3 hyphen-separated components -- confirmed as the fixed
+    structure (never fewer, never more). Returns (triples, errors): an
+    entry with the wrong shape or a blank component is skipped and
+    reported, never guessed at or silently dropped. Components are
+    upper-cased for consistent matching/grouping later (X Table mode).
+    """
+    text = (raw or "").strip()
+    if not text:
+        return [], []
+    triples, errors = [], []
+    for entry in text.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split("-")
+        if len(parts) != 3:
+            errors.append(f"'{entry}' -- expected exactly 3 components (Subject-Level1-Level2)")
+            continue
+        subject, level1, level2 = (p.strip().upper() for p in parts)
+        if not subject or not level1 or not level2:
+            errors.append(f"'{entry}' -- one or more components blank")
+            continue
+        triples.append((subject, level1, level2))
+    return triples, errors
+
+
+def parse_institute_seating_chart_batch(rows):
+    """Validates and parses raw pasted rows (6 cells each, identical
+    shape to Department Seating Chart's paste) into ready-to-save dicts
+    -- WITHOUT touching any database. This is Plan 1's "parse" step,
+    deliberately split from "save": the result is what the preview table
+    shows, what "Save to Database" commits, and what the Add/Delete
+    screen operates on (that screen works on THIS just-parsed batch, not
+    a full reload of everything already in the database).
+
+    Returns (parsed, errors). Each parsed entry:
+      {"enrollment", "student_name", "seat_number", "program_code",
+       "semester_label", "scheme", "status", "subjects_appeared",
+       "subjects": [(subject_code, level1, level2), ...]}
+    A row with the wrong cell count, a blank/invalid enrollment, an
+    unparseable semester-scheme code, or an unrecognized Regular/EX
+    letter is skipped and reported. A malformed Appeared Subjects entry
+    does NOT skip the whole row -- only that one subject entry is
+    dropped and reported, since the rest of the row is still valid data.
+    """
+    parsed, errors = [], []
+    for r_i, row in enumerate(rows):
+        if len(row) < 6:
+            errors.append(f"Row {r_i + 1}: expected 6 columns, found {len(row)} -- skipped")
+            continue
+        enrollment = (row[0] or "").strip()
+        student_name = (row[1] or "").strip()
+        seat_number = (row[2] or "").strip()
+        sem_scheme_raw = (row[3] or "").strip()
+        subjects_appeared = (row[5] or "").strip()
+
+        if not enrollment:
+            errors.append(f"Row {r_i + 1}: blank Enrollment Number -- skipped")
+            continue
+
+        program_code, semester_label, scheme, err = parse_institute_semester_scheme_code(sem_scheme_raw)
+        if err:
+            errors.append(f"Row {r_i + 1}: semester-scheme code '{sem_scheme_raw}' -- {err} -- skipped")
+            continue
+
+        status = normalize_status_code(row[4])
+        if status is None:
+            errors.append(f"Row {r_i + 1}: blank Regular/EX category -- skipped")
+            continue
+
+        subjects, subj_errors = parse_appeared_subjects(subjects_appeared)
+        for se in subj_errors:
+            errors.append(f"Row {r_i + 1}: Appeared Subjects entry {se}")
+
+        student_name, seat_number, was_swapped = fix_swapped_name_seat(student_name, seat_number)
+        parsed.append({
+            "swapped_columns": was_swapped,
+            "enrollment": enrollment, "student_name": student_name, "seat_number": seat_number,
+            "program_code": program_code, "semester_label": semester_label, "scheme": scheme,
+            "status": status, "subjects_appeared": subjects_appeared, "subjects": subjects,
+            # Synthetic, display-only unique key -- an enrollment number
+            # recurs once per semester it was appeared for, so plain
+            # "enrollment" is NOT unique enough to use as a ui.table
+            # row_key on its own.
+            "_key": f"{enrollment}|{semester_label}|{scheme}",
+        })
+    return parsed, errors
+
+
+def save_institute_seating_chart_rows(institute, year, session, parsed_rows):
+    """Upserts already-parsed rows (see parse_institute_seating_chart_batch)
+    into THIS institute+year+session's own database file -- one row per
+    (enrollment, semester_label, scheme), REPLACING any existing row for
+    that combination. That row's structured subject triples are replaced
+    too (deleted then reinserted) so re-saving a corrected row never
+    leaves stale subject entries behind. Returns saved_count.
+    """
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    for r in parsed_rows:
+        conn.execute("""
+            INSERT INTO institute_seating_chart
+                (enrollment, semester_label, scheme, program_code, student_name, seat_number, status, subjects_appeared)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(enrollment, semester_label, scheme)
+            DO UPDATE SET program_code=excluded.program_code, student_name=excluded.student_name,
+                          seat_number=excluded.seat_number, status=excluded.status,
+                          subjects_appeared=excluded.subjects_appeared
+        """, (r["enrollment"], r["semester_label"], r["scheme"], r["program_code"],
+              r["student_name"], r["seat_number"], r["status"], r["subjects_appeared"]))
+        conn.execute("""
+            DELETE FROM institute_seating_chart_subjects
+            WHERE enrollment = ? AND semester_label = ? AND scheme = ?
+        """, (r["enrollment"], r["semester_label"], r["scheme"]))
+        conn.executemany("""
+            INSERT INTO institute_seating_chart_subjects
+                (enrollment, semester_label, scheme, subject_code, level1, level2)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, [(r["enrollment"], r["semester_label"], r["scheme"], s, l1, l2) for (s, l1, l2) in r["subjects"]])
+    conn.commit()
+    conn.close()
+    return len(parsed_rows)
+
+
+def delete_institute_seating_chart_rows(institute, year, session, keys):
+    """Deletes rows (and their subject triples) matching the given
+    (enrollment, semester_label, scheme) keys -- the Add/Delete screen's
+    batch "Delete" button. Keys that don't exist are silently skipped.
+    Returns the number of main rows actually deleted.
+    """
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return 0
+    conn = sqlite3.connect(db_path)
+    count = 0
+    for enrollment, semester_label, scheme in keys:
+        cur = conn.execute("""
+            DELETE FROM institute_seating_chart
+            WHERE enrollment = ? AND semester_label = ? AND scheme = ?
+        """, (enrollment, semester_label, scheme))
+        count += cur.rowcount
+        conn.execute("""
+            DELETE FROM institute_seating_chart_subjects
+            WHERE enrollment = ? AND semester_label = ? AND scheme = ?
+        """, (enrollment, semester_label, scheme))
+    conn.commit()
+    conn.close()
+    return count
+
+
+def fix_swapped_name_seat(student_name, seat_number):
+    """Returns (student_name, seat_number, was_swapped). If the Student Name holds a plain number while the Seat
+    Number does not (the two columns were pasted into each other's boxes), they are put back the right way
+    round. Anything else is returned exactly as it is. Applied when seating-chart rows are READ, so data saved
+    with swapped columns works without any change to the saved file, and when new rows are parsed."""
+    name, seat = (student_name or ""), (seat_number or "")
+    if name.strip().isdigit() and not seat.strip().isdigit():
+        return seat, name, True
+    return name, seat, False
+
+
+def get_unbatchable_students(institute, year, session, program_code, semester_label, scheme):
+    """Students of this Program Code + Semester + Scheme that can NOT be placed in a seat-number batch because
+    their seat number is not a plain whole number (blank, text, ...). [{"enrollment","student_name",
+    "seat_number","status"}, ...]. These are the students get_category_pools() leaves out."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT enrollment, student_name, seat_number, status FROM institute_seating_chart "
+            "WHERE program_code=? AND semester_label=? AND scheme=?", (program_code, semester_label, scheme)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    out = []
+    for enr, name, seat, status in rows:
+        name, seat, _ = fix_swapped_name_seat(name, seat)
+        if not str(seat).strip().lstrip("-").isdigit():
+            out.append({"enrollment": enr, "student_name": name, "seat_number": seat, "status": status})
+    return out
+
+
+def get_institute_seating_chart_rows(institute, year, session):
+    """Every row currently saved for THIS institute+year+session,
+    for display as a plain parsed table.
+
+    Returns a list of dicts: {"enrollment", "student_name",
+    "seat_number", "program_code", "semester_label", "scheme", "status",
+    "subjects_appeared"}, sorted by enrollment then semester.
+    """
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT enrollment, student_name, seat_number, program_code, semester_label, scheme, status, subjects_appeared
+            FROM institute_seating_chart
+            ORDER BY enrollment, semester_label
+        """).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    result = [dict(r) for r in rows]
+    for r in result:
+        r["student_name"], r["seat_number"], _ = fix_swapped_name_seat(r["student_name"], r["seat_number"])
+        r["_key"] = f"{r['enrollment']}|{r['semester_label']}|{r['scheme']}"
+    return result
+# X Table mode reads the SAME institute_seating_chart.db built above --
+# still purely reference/record-keeping, still nothing writes back here
+# from X Table mode. Every helper below is scoped to ONE program code at
+# a time and never aggregates across program codes (Plan 5's "Institute
+# X Table Overview" is the one deliberate, later exception).
+
+def get_institute_seating_chart_program_codes(institute, year, session, level1_filter=None, level2_filter=None):
+    """Unique Program Codes present in this institute+year+session's
+    database, sorted alphabetically -- one X Table button per code.
+
+    If BOTH level1_filter and level2_filter are given (lists), only program codes
+    having at least one student with a subject entry whose Level 1 is in
+    level1_filter AND whose Level 2 is in level2_filter (same entry) are returned."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        if level1_filter is not None and level2_filter is not None:
+            l1 = list(level1_filter)
+            l2 = list(level2_filter)
+            if not l1 or not l2:
+                rows = []
+            else:
+                rows = conn.execute(
+                    "SELECT DISTINCT m.program_code FROM institute_seating_chart m "
+                    "JOIN institute_seating_chart_subjects s "
+                    "ON s.enrollment = m.enrollment AND s.semester_label = m.semester_label AND s.scheme = m.scheme "
+                    f"WHERE s.level1 IN ({','.join('?' * len(l1))}) AND s.level2 IN ({','.join('?' * len(l2))}) "
+                    "ORDER BY m.program_code",
+                    l1 + l2,
+                ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT program_code FROM institute_seating_chart ORDER BY program_code"
+            ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def get_institute_seating_chart_for_program(institute, year, session, program_code,
+                                            level1_filter=None, level2_filter=None):
+    """Every row (plus its structured subject triples) for ONE program
+    code only -- fully self-contained, zero cross-program-code mixing.
+    Returns a list of dicts: {"enrollment", "student_name", "seat_number",
+    "semester_label", "scheme", "status", "subjects": [(subject_code,
+    level1, level2), ...]}, sorted by semester_label, scheme, then
+    enrollment ascending (enrollment is always the innermost/Level-1 sort
+    key, per the project's sort rule; semester+scheme is the Level-2
+    grouping already defined by Plan 2).
+    """
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        main_rows = conn.execute("""
+            SELECT enrollment, student_name, seat_number, semester_label, scheme, status
+            FROM institute_seating_chart WHERE program_code = ?
+            ORDER BY semester_label, scheme, enrollment
+        """, (program_code,)).fetchall()
+        subj_rows = conn.execute("""
+            SELECT s.enrollment, s.semester_label, s.scheme, s.subject_code, s.level1, s.level2
+            FROM institute_seating_chart_subjects s
+            JOIN institute_seating_chart m
+              ON m.enrollment = s.enrollment AND m.semester_label = s.semester_label AND m.scheme = s.scheme
+            WHERE m.program_code = ?
+        """, (program_code,)).fetchall()
+    except sqlite3.OperationalError:
+        main_rows, subj_rows = [], []
+    conn.close()
+
+    subjects_by_key = {}
+    for s in subj_rows:
+        key = (s["enrollment"], s["semester_label"], s["scheme"])
+        subjects_by_key.setdefault(key, []).append((s["subject_code"], s["level1"], s["level2"]))
+
+    result = []
+    for m in main_rows:
+        key = (m["enrollment"], m["semester_label"], m["scheme"])
+        fixed_name, fixed_seat, _swapped = fix_swapped_name_seat(m["student_name"], m["seat_number"])
+        result.append({
+            "enrollment": m["enrollment"], "student_name": fixed_name, "seat_number": fixed_seat,
+            "semester_label": m["semester_label"], "scheme": m["scheme"], "status": m["status"],
+            "subjects": subjects_by_key.get(key, []),
+        })
+    # Optional Level 1 / Level 2 filter (X Table): keep only subject entries whose Level 1 AND
+    # Level 2 are both selected, and drop any student left with no matching subject -- so every
+    # count/table built from these rows reflects only students who took the filtered subjects.
+    if level1_filter is not None and level2_filter is not None:
+        l1set, l2set = set(level1_filter), set(level2_filter)
+        filtered = []
+        for r in result:
+            subs = [x for x in r["subjects"] if x[1] in l1set and x[2] in l2set]
+            if subs:
+                r = dict(r)
+                r["subjects"] = subs
+                filtered.append(r)
+        result = filtered
+    return result
+
+
+def group_program_rows_by_semester_scheme(program_rows):
+    """Groups get_institute_seating_chart_for_program()'s flat list into
+    Plan 2's nesting: semesters in SEMESTER_NAMES order, schemes
+    alphabetical within each semester. Returns a list of
+    (semester_label, [(scheme, [rows...]), ...]) pairs, skipping
+    semesters/schemes with no data.
+    """
+    by_sem = {}
+    for r in program_rows:
+        by_sem.setdefault(r["semester_label"], {}).setdefault(r["scheme"], []).append(r)
+
+    ordered = []
+    for sem in SEMESTER_NAMES:
+        if sem not in by_sem:
+            continue
+        schemes = by_sem[sem]
+        scheme_list = [(scheme, rows) for scheme, rows in sorted(schemes.items())]
+        ordered.append((sem, scheme_list))
+    return ordered
+
+
+def build_x_table_matrix(rows_for_semester_scheme):
+    """Builds ONE Plan-2 matrix (one program code + one semester + one
+    scheme already filtered in) out of rows from
+    get_institute_seating_chart_for_program(). Subject/Level1/Level2
+    columns are discovered purely from the data present (no fixed master
+    list), sorted for stable display.
+
+    Returns (columns, rows):
+      columns: [(subject_code, level1, level2), ...] sorted
+      rows: [{"enrollment", "student_name", "ticks": {triple: bool}}, ...]
+        sorted by enrollment ascending (innermost sort, per project rule)
+    """
+    col_set = set()
+    for r in rows_for_semester_scheme:
+        for triple in r["subjects"]:
+            col_set.add(triple)
+    columns = sorted(col_set)
+
+    out_rows = []
+    for r in sorted(rows_for_semester_scheme, key=lambda x: x["enrollment"]):
+        present = set(r["subjects"])
+        ticks = {c: (c in present) for c in columns}
+        out_rows.append({"enrollment": r["enrollment"], "student_name": r["student_name"],
+                         "status": r["status"], "ticks": ticks})
+    return columns, out_rows
+
+
+def _semester_scheme_groups(program_rows):
+    """Shared by Plan 3 and Plan 4 (and the institute overview): discovers, purely
+    from the data present, which semesters exist (SEMESTER_NAMES order), which
+    schemes exist within each semester (alphabetical) and which raw categories
+    actually occur under each (semester, scheme) -- only categories WITH data get
+    a column.
+
+    Returns (ordered_semesters, groups, flat_columns):
+      groups: [(semester_label, [(scheme, [category, ...]), ...]), ...]
+      flat_columns: [(semester_label, scheme, category), ...] in header order.
+    """
+    sem_scheme_cats = {}
+    for r in program_rows:
+        sem_scheme_cats.setdefault(r["semester_label"], {}).setdefault(r["scheme"], set()).add(r["status"])
+
+    ordered_semesters = [s for s in SEMESTER_NAMES if s in sem_scheme_cats]
+    groups = [
+        (sem, [(scheme, order_categories(cats)) for scheme, cats in sorted(sem_scheme_cats[sem].items())])
+        for sem in ordered_semesters
+    ]
+    flat_columns = [
+        (sem, scheme, cat)
+        for sem, schemes in groups for scheme, cats in schemes for cat in cats
+    ]
+    return ordered_semesters, groups, flat_columns
+
+
+def build_semesterwise_overview(program_rows):
+    """Plan 3 (revised, scheme + Regular/EX aware): one row per
+    enrollment number (a student's appearance history across semesters
+    for this program code), tick marks placed under whichever
+    semester -> scheme -> Regular/EX cell matches that student's actual
+    record for that semester.
+
+    Row order: grouped by the semester the student FIRST appears in
+    (ascending, per SEMESTER_NAMES order), sub-grouped by the scheme
+    used in that first semester, then enrollment number ascending
+    (innermost sort, per the project's sort rule).
+
+    Returns (groups, flat_columns, rows):
+      groups / flat_columns: see _semester_scheme_groups()
+      rows: [{"enrollment", "student_name", "ticks": {(sem,scheme,status): bool}}, ...]
+    """
+    ordered_semesters, groups, flat_columns = _semester_scheme_groups(program_rows)
+    sem_index = {s: i for i, s in enumerate(ordered_semesters)}
+
+    by_enrollment = {}
+    for r in program_rows:
+        by_enrollment.setdefault(r["enrollment"], []).append(r)
+
+    rows = []
+    for enrollment, recs in by_enrollment.items():
+        first_rec = min(recs, key=lambda r: sem_index[r["semester_label"]])
+        ticks = {(r["semester_label"], r["scheme"], r["status"]): True for r in recs}
+        rows.append({
+            "enrollment": enrollment,
+            "student_name": recs[0]["student_name"],
+            "ticks": ticks,
+            "_sort_key": (sem_index[first_rec["semester_label"]], first_rec["scheme"], enrollment),
+        })
+    rows.sort(key=lambda x: x["_sort_key"])
+    for r in rows:
+        del r["_sort_key"]
+    return groups, flat_columns, rows
+
+
+def build_semesterwise_count(program_rows):
+    """Plan 4 (revised, scheme + Regular/EX aware): counts, not ticks --
+    for each semester -> scheme -> Regular/EX combination, how many
+    enrollment records fall into it, plus a per-semester total (summed
+    across ALL schemes in that semester, not split by scheme).
+
+    Returns (groups, flat_columns, counts, totals):
+      groups / flat_columns: see _semester_scheme_groups()
+      counts: {(semester_label, scheme, status): int}
+      totals: {semester_label: int}  -- Regular+EX combined, all schemes
+    """
+    ordered_semesters, groups, flat_columns = _semester_scheme_groups(program_rows)
+
+    counts = {}
+    for col in flat_columns:
+        counts[col] = 0
+    totals = {sem: 0 for sem in ordered_semesters}
+
+    for r in program_rows:
+        key = (r["semester_label"], r["scheme"], r["status"])
+        counts[key] = counts.get(key, 0) + 1
+        totals[r["semester_label"]] += 1
+
+    return groups, flat_columns, counts, totals
+
+
+def build_institute_x_table_overview(institute, year, session, level1_filter=None, level2_filter=None):
+    """Plan 5: "Institute X Table Overview" -- the one deliberate
+    exception to "no interrelation between program codes." ONE matrix
+    spanning ALL program codes: the column header (semester -> scheme ->
+    Regular/EX) is a UNION across every program code's own data, so
+    every program code's row-pair lines up under the same header even
+    if a given program doesn't have data for every column. Each program
+    code then contributes its own two data rows (Regular/EX counts per
+    scheme per semester, then a per-semester total) -- same shape as
+    Plan 4, just stacked program-code by program-code in one shared
+    table instead of one table per program code.
+
+    Returns (groups, flat_columns, per_program):
+      groups / flat_columns: see _semester_scheme_groups() -- union
+        across all program codes
+      per_program: [{"program_code", "counts", "totals"}, ...] in the
+        same program-code order as get_institute_seating_chart_program_codes()
+    """
+    program_codes = get_institute_seating_chart_program_codes(institute, year, session, level1_filter, level2_filter)
+
+    rows_by_program = {}
+    all_rows = []
+    for code in program_codes:
+        rows = get_institute_seating_chart_for_program(institute, year, session, code, level1_filter, level2_filter)
+        rows_by_program[code] = rows
+        all_rows.extend(rows)
+
+    _ordered_semesters, groups, flat_columns = _semester_scheme_groups(all_rows)
+
+    per_program = []
+    for code in program_codes:
+        rows = rows_by_program[code]
+        counts, totals = {}, {}
+        for r in rows:
+            key = (r["semester_label"], r["scheme"], r["status"])
+            counts[key] = counts.get(key, 0) + 1
+            totals[r["semester_label"]] = totals.get(r["semester_label"], 0) + 1
+        per_program.append({"program_code": code, "counts": counts, "totals": totals})
+
+    return groups, flat_columns, per_program
+
+
+# ==========================================================
+# X TABLE -- shared grid models. The on-screen table, the PDF and the CSV are all
+# built from the SAME model so they can never disagree.
+# model = {"title", "ncols", "fixed_count", "trailing_count",
+#          "header": [[cell, ...], ...], "body": [[cell, ...], ...]}
+# cell  = {"text", "colspan", "rowspan", "kind"}
+# ==========================================================
+
+def _xt_cell(text="", colspan=1, rowspan=1, kind=""):
+    return {"text": "" if text is None else str(text), "colspan": colspan, "rowspan": rowspan, "kind": kind}
+
+
+def _xt_header_rows(fixed_labels, groups, trailing_labels=()):
+    r1 = [_xt_cell(lbl, 1, 3, "hdrfix") for lbl in fixed_labels]
+    r2, r3 = [], []
+    for sem, schemes in groups:
+        r1.append(_xt_cell(sem, sum(len(cats) for _s, cats in schemes), 1, "hdr"))
+        for scheme, cats in schemes:
+            r2.append(_xt_cell(scheme, len(cats), 1, "hdr"))
+            for cat in cats:
+                r3.append(_xt_cell(cat, 1, 1, "hdrsub"))
+    for lbl in trailing_labels:
+        r1.append(_xt_cell(lbl, 1, 3, "hdrfix"))
+    return [r1, r2, r3]
+
+
+def xt_count_table_model(year, session, program_code, program_rows):
+    """Semesterwise Student Count for ONE program code: counts row, per-semester
+    Total row, and a final Grand Total row (all semesters). None if no data."""
+    groups, flat_columns, counts, totals = build_semesterwise_count(program_rows)
+    if not groups:
+        return None
+    fixed = ("Sr. No.", "Year", "Program Code", "Semester (Odd/Even)")
+    body = [
+        [_xt_cell(1), _xt_cell(year), _xt_cell(program_code), _xt_cell(session)]
+        + [_xt_cell(counts.get(col, 0), kind="count") for col in flat_columns],
+        [_xt_cell(""), _xt_cell(""), _xt_cell(""), _xt_cell("Total", kind="totallabel")]
+        + [_xt_cell(totals.get(sem, 0), sum(len(c) for _s, c in schemes), 1, "total") for sem, schemes in groups],
+        [_xt_cell("Grand Total (all semesters)", 4, 1, "grand"),
+         _xt_cell(sum(totals.values()), len(flat_columns), 1, "grand")],
+    ]
+    return {"title": f"Semesterwise Student Count -- {program_code}", "ncols": 4 + len(flat_columns),
+            "fixed_count": 4, "trailing_count": 0, "header": _xt_header_rows(fixed, groups), "body": body}
+
+
+def xt_institute_overview_model(year, session, groups, flat_columns, per_program):
+    """Institute X Table Overview: per program code a counts row + semester Total row
+    with a merged 'Program Total' (all its semesters), then an 'ALL PROGRAM CODES' block
+    (summed counts per column, per-semester totals, overall grand total)."""
+    if not groups:
+        return None
+    fixed = ("Sr. No.", "Year", "Program Code", "Semester (Odd/Even)")
+    ncols = 4 + len(flat_columns) + 1
+    body = []
+    all_counts = {col: 0 for col in flat_columns}
+    all_totals = {sem: 0 for sem, _ in groups}
+    sr_no = 1
+    for prog in per_program:
+        code, counts, totals = prog["program_code"], prog["counts"], prog["totals"]
+        body.append(
+            [_xt_cell(sr_no), _xt_cell(year), _xt_cell(code), _xt_cell(session)]
+            + [_xt_cell(counts.get(col, 0), kind="count") for col in flat_columns]
+            + [_xt_cell(sum(totals.values()), 1, 2, "progtotal")]
+        )
+        body.append(
+            [_xt_cell(""), _xt_cell(""), _xt_cell(code), _xt_cell("Total", kind="totallabel")]
+            + [_xt_cell(totals.get(sem, 0), sum(len(c) for _s, c in schemes), 1, "total") for sem, schemes in groups]
+        )
+        for col in flat_columns:
+            all_counts[col] += counts.get(col, 0)
+        for sem in all_totals:
+            all_totals[sem] += totals.get(sem, 0)
+        sr_no += 1
+    grand = sum(all_totals.values())
+    body.append(
+        [_xt_cell("", kind="grand"), _xt_cell(year, kind="grand"), _xt_cell("ALL PROGRAM CODES", kind="grand"),
+         _xt_cell(session, kind="grand")]
+        + [_xt_cell(all_counts[col], kind="grand") for col in flat_columns]
+        + [_xt_cell(grand, 1, 2, "grand")]
+    )
+    body.append(
+        [_xt_cell("", kind="grand"), _xt_cell("", kind="grand"), _xt_cell("ALL PROGRAM CODES", kind="grand"),
+         _xt_cell("Total", kind="grand")]
+        + [_xt_cell(all_totals[sem], sum(len(c) for _s, c in schemes), 1, "grand") for sem, schemes in groups]
+    )
+    return {"title": "Institute X Table Overview", "ncols": ncols, "fixed_count": 4, "trailing_count": 1,
+            "header": _xt_header_rows(fixed, groups, ("Program Total",)), "body": body}
+
+
+def _xt_layout(rows):
+    """Places spanning cells on a grid; returns [(row, col, cell), ...]."""
+    occupied, placements = set(), []
+    for r, row in enumerate(rows):
+        c = 0
+        for cell in row:
+            while (r, c) in occupied:
+                c += 1
+            for dr in range(cell["rowspan"]):
+                for dc in range(cell["colspan"]):
+                    occupied.add((r + dr, c + dc))
+            placements.append((r, c, cell))
+            c += cell["colspan"]
+    return placements
+
+
+def _xt_expand(rows, ncols, repeat):
+    """Full text matrix. repeat=True copies a spanning cell's text into every covered
+    cell (used for headers); False leaves covered cells blank (used for body rows)."""
+    matrix = [["" for _ in range(ncols)] for _ in rows]
+    for r, c, cell in _xt_layout(rows):
+        for dr in range(cell["rowspan"]):
+            for dc in range(cell["colspan"]):
+                rr, cc = r + dr, c + dc
+                if rr < len(matrix) and cc < ncols and (repeat or (dr == 0 and dc == 0)):
+                    matrix[rr][cc] = cell["text"]
+    return matrix
+
+
+def xt_model_to_csv(model, out_path):
+    """CSV can't hold merged headers, so the 3 header rows are flattened into one column
+    name like 'FIRST SEMESTER | K | R'. UTF-8 with BOM so Excel opens it correctly."""
+    import csv
+    hdr = _xt_expand(model["header"], model["ncols"], True)
+    flat = []
+    for c in range(model["ncols"]):
+        parts = []
+        for r in range(len(hdr)):
+            v = hdr[r][c]
+            if v and (not parts or parts[-1] != v):
+                parts.append(v)
+        flat.append(" | ".join(parts))
+    body = _xt_expand(model["body"], model["ncols"], False)
+    with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(flat)
+        w.writerows(body)
+    return out_path
+
+
+def xt_model_to_pdf(model, out_path, heading_lines=()):
+    """Landscape A4 PDF of a grid model, merged header cells and totals rows included."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from xml.sax.saxutils import escape
+
+    ncols, fixed, trailing = model["ncols"], model["fixed_count"], model["trailing_count"]
+    n_values = ncols - fixed - trailing
+    usable = 297 - 12
+    fixed_w = [10, 18, 24, 26][:fixed]
+    trailing_w = [20] * trailing
+    value_w = max((usable - sum(fixed_w) - sum(trailing_w)) / max(n_values, 1), 4)
+    widths = fixed_w + [value_w] * n_values + trailing_w
+    font = 7 if value_w >= 10 else 6 if value_w >= 7 else 5
+
+    ss = getSampleStyleSheet()
+    base = ss["Normal"].clone("xtbase")
+    base.fontSize, base.leading, base.alignment = font, font + 1.5, TA_CENTER
+    bold = base.clone("xtbold")
+    bold.fontName = "Helvetica-Bold"
+    white = bold.clone("xtwhite")
+    white.textColor = colors.white
+
+    header, body = model["header"], model["body"]
+    nh = len(header)
+    nrows = nh + len(body)
+    data = [["" for _ in range(ncols)] for _ in range(nrows)]
+    cmds = [
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 1), ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+        ("BACKGROUND", (0, 0), (-1, nh - 1), colors.HexColor("#4472C4")),
+    ]
+    bg = {"total": "#D9E2F3", "totallabel": "#D9E2F3", "progtotal": "#B4C6E7", "grand": "#8EA9DB"}
+    for offset, rows, is_header in ((0, header, True), (nh, body, False)):
+        for r, c, cell in _xt_layout(rows):
+            text = escape(cell["text"]) or "&nbsp;"
+            is_bold = is_header or cell["kind"] in bg
+            data[offset + r][c] = Paragraph(text, white if is_header else (bold if is_bold else base))
+            r1, c1 = offset + r + cell["rowspan"] - 1, c + cell["colspan"] - 1
+            if cell["colspan"] > 1 or cell["rowspan"] > 1:
+                cmds.append(("SPAN", (c, offset + r), (c1, r1)))
+            if not is_header and cell["kind"] in bg:
+                cmds.append(("BACKGROUND", (c, offset + r), (c1, r1), colors.HexColor(bg[cell["kind"]])))
+
+    doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
+                            leftMargin=6 * mm, rightMargin=6 * mm, topMargin=6 * mm, bottomMargin=6 * mm)
+    story = []
+    for i, line in enumerate(heading_lines):
+        story.append(Paragraph(escape(str(line)), ss["Heading3"] if i == 1 else ss["Normal"]))
+    story.append(Spacer(1, 6))
+    t = Table(data, colWidths=[w * mm for w in widths], repeatRows=nh)
+    t.setStyle(TableStyle(cmds))
+    story.append(t)
+    doc.build(story)
+    return out_path
 
 
 def build_student_history(all_extracted, db_path=DB_FILE):
@@ -7653,7 +9167,7 @@ def generate_yearly_result_pdf(db_path=DB_FILE, out_path=None, student_status="b
         for at least one of the given semesters -- and, if a status
         filter is active, at least one of those semesters matching the
         requested Regular/EX status."""
-        wanted = {"regular": "Regular", "ex": "EX"}.get(student_status)
+        wanted = resolve_status_filter(student_status)
         touching = set()
         for enr, sem in history:
             if sem not in sems:
@@ -7749,7 +9263,7 @@ def generate_yearly_result_pdf(db_path=DB_FILE, out_path=None, student_status="b
 
     styles = getSampleStyleSheet()
 
-    status_suffix = {"regular": " (Regular)", "ex": " (EX)", "both": ""}.get(student_status, "")
+    status_suffix = status_file_suffix(student_status)
     out_path = out_path or f"Yearly_Result_Report{status_suffix}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=page_size,
                              leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
@@ -7787,7 +9301,7 @@ def generate_yearly_result_pdf(db_path=DB_FILE, out_path=None, student_status="b
             for i, line in enumerate(_report_seating_gap_lines(section["semesters"], student_status, db_path)):
                 story.append(Paragraph(line, gap_warn_style if i > 0 else gap_style))
         if not section_enrollments:
-            filter_note = f" matching '{student_status}'" if student_status in ("regular", "ex") else ""
+            filter_note = f" matching '{resolve_status_filter(student_status)}'" if resolve_status_filter(student_status) else ""
             story.append(Paragraph(f"No enrollment numbers have data for this year yet{filter_note}.", styles["Normal"]))
             section_summaries.append((section["title"], 0, 0))
             continue
@@ -7950,7 +9464,7 @@ def compute_yearly_eligibility_rows(db_path=DB_FILE, student_status="both"):
         return compute_year_eligibility_and_remark(failed_count, total_subjects, lower_failed)
 
     def enrollments_touching(sems):
-        wanted = {"regular": "Regular", "ex": "EX"}.get(student_status)
+        wanted = resolve_status_filter(student_status)
         touching = set()
         for enr, sem in history:
             if sem not in sems:
@@ -8051,7 +9565,7 @@ def generate_yearly_eligibility_pdf(db_path=DB_FILE, out_path=None, student_stat
     scale = usable_w_mm / sum(raw_widths)
     col_widths = [w * scale * mm for w in raw_widths]
 
-    out_path = out_path or "Yearly_Eligible_NonEligible_Report.pdf"
+    out_path = out_path or f"Yearly_Eligible_NonEligible_Report{status_file_suffix(student_status)}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
                              leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
                              topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
@@ -8080,7 +9594,7 @@ def generate_yearly_eligibility_pdf(db_path=DB_FILE, out_path=None, student_stat
             story.append(PageBreak())  # every year starts on its own fresh page
         included_years.append(year_label)
 
-        status_note = {"regular": " (Regular)", "ex": " (EX)", "both": ""}.get(student_status, "")
+        status_note = status_note_text(student_status)
         story.append(Paragraph(f"{year_label} -- Eligible/Non-Eligible Student List{status_note}",
                                 styles["Heading2"]))
         story.append(Spacer(1, 3))
@@ -8167,7 +9681,7 @@ def compute_topper_lists(db_path=DB_FILE, student_status="both", top_n=5):
         return [], []
 
     status_map = compute_student_status(all_extracted, db_path)
-    wanted = {"regular": "Regular", "ex": "EX"}.get(student_status)
+    wanted = resolve_status_filter(student_status)
 
     def parse_pct(value):
         # Tolerates a trailing '%' (e.g. someone typed/pasted "31%"
@@ -8353,13 +9867,13 @@ def generate_topper_list_pdf(db_path=DB_FILE, out_path=None, student_status="bot
                               key=lambda s: SEMESTER_NAMES.index(s) if s in SEMESTER_NAMES else 999)
     latest_semester = semesters_in_db[-1] if semesters_in_db else None
 
-    out_path = out_path or "Semesterwise_and_Yearly_Topper_List.pdf"
+    out_path = out_path or f"Semesterwise_and_Yearly_Topper_List{status_file_suffix(student_status)}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
                              leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
                              topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
     story = build_topper_list_heading_flowables(latest_semester, db_path)
 
-    status_note = {"regular": " (Regular)", "ex": " (EX)", "both": ""}.get(student_status, "")
+    status_note = status_note_text(student_status)
     sem_columns = make_columns("Semester", "Semester Percentage")
     year_columns = make_columns("Year", "Yearly Percentage")
 
@@ -8411,7 +9925,7 @@ def compute_bright_weak_lists(db_path=DB_FILE, student_status="both",
         return []
 
     status_map = compute_student_status(all_extracted, db_path)
-    wanted = {"regular": "Regular", "ex": "EX"}.get(student_status)
+    wanted = resolve_status_filter(student_status)
 
     def parse_pct(value):
         # Tolerates a trailing '%' (e.g. someone typed/pasted "31%"
@@ -8541,7 +10055,7 @@ def generate_bright_weak_pdf(db_path=DB_FILE, out_path=None, student_status="bot
                 P(f"{row['percentage']:.2f}"),
             ])
 
-    out_path = out_path or "Semesterwise_Bright_Weak_Student_List.pdf"
+    out_path = out_path or f"Semesterwise_Bright_Weak_Student_List{status_file_suffix(student_status)}.pdf"
     doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
                              leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
                              topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
@@ -8557,7 +10071,7 @@ def generate_bright_weak_pdf(db_path=DB_FILE, out_path=None, student_status="bot
         print(f"No student data found for the Bright/Weak Student List [{student_status}] in {db_path}.")
         return None
 
-    status_note = {"regular": " (Regular)", "ex": " (EX)", "both": ""}.get(student_status, "")
+    status_note = status_note_text(student_status)
     included_semesters = []
     for sem_label, academic_year, year_label, weak_rows, bright_rows in semester_data:
         if not weak_rows and not bright_rows:
@@ -8599,6 +10113,415 @@ def generate_bright_weak_pdf(db_path=DB_FILE, out_path=None, student_status="bot
     doc.build(story)
     print(f"Saved PDF: {out_path}  (landscape A4, Semester wise Bright/Weak Student List, [{student_status}], "
           f"weak<{weak_threshold:g}%, bright>{bright_threshold:g}%, {len(included_semesters)} semester(s))")
+    return out_path
+
+
+# ==========================================================
+# DEPARTMENTAL REPORT
+# ==========================================================
+# Per-scheme (it reads/writes only the active scheme's own database, and the
+# seating chart is filtered to the active scheme's letter) and per-category
+# (one raw category per PDF; "All combined" only adds categories together
+# inside this same scheme). Setup = result classes + result->class mapping +
+# enrolled students per semester/category + a Program Code text.
+
+def _dept_connect(db_path):
+    """Opens db_path with the departmental tables guaranteed to exist (older databases
+    created before this report existed get them added here, harmlessly)."""
+    init_db(db_path)
+    return sqlite3.connect(db_path)
+
+
+def load_dept_result_classes(db_path=DB_FILE):
+    """[{"id", "name", "counts_pass"}, ...] in the order the user defined them."""
+    if not os.path.exists(db_path):
+        return []
+    conn = _dept_connect(db_path)
+    rows = conn.execute(
+        "SELECT id, name, counts_pass FROM dept_result_classes ORDER BY sort_order, id"
+    ).fetchall()
+    conn.close()
+    return [{"id": r[0], "name": r[1], "counts_pass": bool(r[2])} for r in rows]
+
+
+def save_dept_result_classes(classes, db_path=DB_FILE):
+    """classes: [{"id": int|None, "name", "counts_pass"}, ...] in display order. Existing ids are
+    updated (so a renamed class keeps its mapping), new ones inserted, and any class no longer in
+    the list is deleted together with the mapping rows that pointed at it.
+    Returns the saved list (with ids)."""
+    conn = _dept_connect(db_path)
+    existing = {r[0] for r in conn.execute("SELECT id FROM dept_result_classes")}
+    keep = set()
+    for order, c in enumerate(classes):
+        name = (c.get("name") or "").strip()
+        flag = 1 if c.get("counts_pass") else 0
+        cid = c.get("id")
+        if cid is not None and cid in existing:
+            conn.execute(
+                "UPDATE dept_result_classes SET name=?, counts_pass=?, sort_order=? WHERE id=?",
+                (name, flag, order, cid),
+            )
+            keep.add(cid)
+        else:
+            cur = conn.execute(
+                "INSERT INTO dept_result_classes (name, counts_pass, sort_order) VALUES (?, ?, ?)",
+                (name, flag, order),
+            )
+            keep.add(cur.lastrowid)
+    for cid in existing - keep:
+        conn.execute("DELETE FROM dept_result_classes WHERE id=?", (cid,))
+    if keep:
+        conn.execute(
+            f"DELETE FROM dept_result_mapping WHERE class_id NOT IN ({','.join('?' * len(keep))})", list(keep)
+        )
+    else:
+        conn.execute("DELETE FROM dept_result_mapping")
+    conn.commit()
+    conn.close()
+    return load_dept_result_classes(db_path)
+
+
+def load_dept_result_mapping(db_path=DB_FILE):
+    """{raw result text: class_id}"""
+    if not os.path.exists(db_path):
+        return {}
+    conn = _dept_connect(db_path)
+    rows = conn.execute("SELECT result_text, class_id FROM dept_result_mapping").fetchall()
+    conn.close()
+    return {r[0]: r[1] for r in rows}
+
+
+def save_dept_result_mapping(mapping, db_path=DB_FILE):
+    """mapping: {raw result text: class_id or None}. Replaces the whole saved mapping; entries with
+    no class are simply not stored (= unmapped)."""
+    conn = _dept_connect(db_path)
+    conn.execute("DELETE FROM dept_result_mapping")
+    conn.executemany(
+        "INSERT INTO dept_result_mapping (result_text, class_id) VALUES (?, ?)",
+        [(t, cid) for t, cid in mapping.items() if cid is not None],
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_dept_data_semesters(db_path=DB_FILE):
+    """Semesters that have student marks data in this scheme's database, in semester order."""
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT semester_label FROM student_records WHERE enrollment IS NOT NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return sorted({r[0] for r in rows if r[0]},
+                  key=lambda s: SEMESTER_NAMES.index(s) if s in SEMESTER_NAMES else 999)
+
+
+def load_dept_semesters_off(db_path=DB_FILE):
+    """Semesters the user UNticked for the Departmental Report (default: none, i.e. every semester is
+    ticked -- so a semester that appears later is included automatically)."""
+    raw = load_report_settings(db_path).get("dept_semesters_off") or "[]"
+    try:
+        return set(json.loads(raw))
+    except (ValueError, TypeError):
+        return set()
+
+
+def save_dept_semesters_off(off, db_path=DB_FILE):
+    save_report_settings({"dept_semesters_off": json.dumps(sorted(off))}, db_path)
+
+
+def get_dept_selected_semesters(db_path=DB_FILE):
+    """Ticked semesters (those with data and not unticked), in semester order."""
+    off = load_dept_semesters_off(db_path)
+    return [s for s in list_dept_data_semesters(db_path) if s not in off]
+
+
+def list_unique_results(db_path=DB_FILE, semesters=None):
+    """Every distinct, non-blank Result text found in this scheme's database, alphabetical. If
+    semesters is given, only Results occurring in those semesters."""
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        sql = "SELECT DISTINCT value FROM student_records WHERE group_name = 'result' AND enrollment IS NOT NULL"
+        params = []
+        if semesters is not None:
+            if not semesters:
+                conn.close()
+                return []
+            sql += f" AND semester_label IN ({','.join('?' * len(semesters))})"
+            params = list(semesters)
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    found = set()
+    for (v,) in rows:
+        text = str(clean_value(v) or "").strip()
+        if text:
+            found.add(text)
+    return sorted(found, key=lambda s: (s.lower(), s))
+
+
+def load_dept_enrolled(db_path=DB_FILE):
+    """{(semester_label, category): enrolled count}"""
+    if not os.path.exists(db_path):
+        return {}
+    conn = _dept_connect(db_path)
+    rows = conn.execute("SELECT semester_label, category, enrolled FROM dept_enrolled").fetchall()
+    conn.close()
+    return {(r[0], r[1]): r[2] for r in rows}
+
+
+def save_dept_enrolled(values, db_path=DB_FILE):
+    """values: {(semester_label, category): int}. Replaces the whole saved set."""
+    conn = _dept_connect(db_path)
+    conn.execute("DELETE FROM dept_enrolled")
+    conn.executemany(
+        "INSERT INTO dept_enrolled (semester_label, category, enrolled) VALUES (?, ?, ?)",
+        [(s, c, int(n)) for (s, c), n in values.items()],
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_dept_program_code(db_path=DB_FILE):
+    return (load_report_settings(db_path).get("dept_program_code") or "").strip()
+
+
+def save_dept_program_code(code, db_path=DB_FILE):
+    save_report_settings({"dept_program_code": (code or "").strip()}, db_path)
+
+
+def get_dept_semester_categories():
+    """{semester_label: [category, ...]} -- the raw categories the ACTIVE scheme's seating chart has
+    for each semester (never another scheme's)."""
+    out = {}
+    if ACTIVE_SEATING_DB_FILE and os.path.exists(ACTIVE_SEATING_DB_FILE):
+        conn = sqlite3.connect(ACTIVE_SEATING_DB_FILE)
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT semester_label, status FROM seating_chart WHERE scheme = ?", (ACTIVE_SCHEME,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        conn.close()
+        for sem, status in rows:
+            if status:
+                out.setdefault(sem, set()).add(status)
+    return {s: order_categories(c) for s, c in out.items()}
+
+
+def dept_report_blockers(db_path=DB_FILE):
+    """Reasons the Departmental Report cannot be generated yet (empty list = good to go), judged on
+    what is SAVED."""
+    blockers = []
+    classes = load_dept_result_classes(db_path)
+    if not classes:
+        blockers.append("No result classes defined/saved yet.")
+    selected = get_dept_selected_semesters(db_path)
+    if not selected:
+        blockers.append("No semester is ticked in section 3.")
+    valid_ids = {c["id"] for c in classes}
+    mapping = load_dept_result_mapping(db_path)
+    # Only Results occurring in the TICKED semesters can block generation.
+    unmapped = [r for r in list_unique_results(db_path, selected) if mapping.get(r) not in valid_ids]
+    if unmapped:
+        shown = ", ".join(unmapped[:8]) + (f" ... (+{len(unmapped) - 8} more)" if len(unmapped) > 8 else "")
+        blockers.append(f"{len(unmapped)} Result value(s) not assigned to a class: {shown}")
+    if not load_dept_program_code(db_path):
+        blockers.append("Program Code not entered/saved yet.")
+    return blockers
+
+
+def compute_departmental_rows(db_path=DB_FILE, student_status="both"):
+    """One row per semester for the chosen category (or All combined).
+    Returns (rows, classes, program_code, unmapped, missing_enrolled):
+      rows: [{"semester_label", "year_label", "enrolled", "appeared", "not_appearing",
+              "class_counts": {class_id: n}, "total_pass"}, ...]
+      unmapped: set of Result texts of in-scope students that have no class
+      missing_enrolled: semester labels that have appeared students but no enrolled number saved
+    A semester with nothing appeared and nothing enrolled for this category is left out."""
+    classes = load_dept_result_classes(db_path)
+    mapping = load_dept_result_mapping(db_path)
+    enrolled_saved = load_dept_enrolled(db_path)
+    program_code = load_dept_program_code(db_path)
+
+    all_extracted, _ = load_all_records_from_db(db_path)
+    enrollments, _programs, _names, semesters, history = build_student_history(all_extracted, db_path)
+    status_map = compute_student_status(all_extracted, db_path)
+    wanted = resolve_status_filter(student_status)
+    class_ids = [c["id"] for c in classes]
+
+    selected = set(get_dept_selected_semesters(db_path))
+    rows, unmapped, missing = [], set(), []
+    for sem in semesters:
+        if sem not in selected:
+            continue
+        counts = {cid: 0 for cid in class_ids}
+        appeared = 0
+        for enr in enrollments:
+            rec = history.get((enr, sem))
+            if not rec:
+                continue
+            if wanted is not None and status_map.get((enr, sem)) != wanted:
+                continue
+            result = (rec["result"] or "").strip()
+            if not result:
+                continue  # no Result recorded -> did not appear
+            appeared += 1
+            cid = mapping.get(result)
+            if cid in counts:
+                counts[cid] += 1
+            else:
+                unmapped.add(result)
+
+        if wanted is None:
+            vals = [n for (s, _c), n in enrolled_saved.items() if s == sem]
+            enrolled, has_entry = sum(vals), bool(vals)
+        else:
+            enrolled = enrolled_saved.get((sem, wanted), 0)
+            has_entry = (sem, wanted) in enrolled_saved
+        if appeared == 0 and enrolled == 0:
+            continue
+        if appeared > 0 and not has_entry:
+            missing.append(sem)
+
+        _s, exam_year, academic_year, _label = parse_exam_session(get_semester_identity_text(sem, "year", db_path))
+        year_label = f"{academic_year} ({_s.title()}-{exam_year})" if academic_year and _s else academic_year
+        rows.append({
+            "semester_label": sem, "year_label": year_label, "enrolled": enrolled, "appeared": appeared,
+            "not_appearing": enrolled - appeared, "class_counts": counts,
+            "total_pass": sum(counts[c["id"]] for c in classes if c["counts_pass"]),
+        })
+    return rows, classes, program_code, unmapped, missing
+
+
+def build_departmental_heading_flowables(department_name, semester_label, db_path=DB_FILE):
+    """"Departmental Report -- <department>" (centred) / blank / blank / the common Institute Name+Address /
+    Program / Academic Year block. No Exam Session row, since the report spans several semesters."""
+    from reportlab.platypus import Spacer
+    lines = [{"text": f"Departmental Report -- {department_name}".rstrip(" -"), "align": "CENTER",
+              "bold": True, "size": 14}, None, None]
+    lines += _common_heading_lines(semester_label, db_path, include_exam_session=False)
+    flowables = _render_heading_lines(lines)
+    flowables.append(Spacer(1, 10))
+    return flowables
+
+
+def generate_departmental_pdf(db_path=DB_FILE, out_path=None, student_status="both", department_name="",
+                              show_percentage=False):
+    """Builds the Departmental Report PDF for ONE category (or All combined): heading block, the
+    seating-chart gap note, one table row per semester, then the signature block.
+    show_percentage=True prints each class count (and the Total column) as e.g. "12 (30%)", the percentage
+    being of Total Appeared for that row.
+    Raises ValueError (instead of printing wrong numbers) if setup is incomplete or any Result text
+    has no class. Returns None if there is no data for this category."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+
+    blockers = dept_report_blockers(db_path)
+    if blockers:
+        raise ValueError("Departmental Report setup incomplete -- " + " | ".join(blockers))
+
+    rows, classes, program_code, unmapped, missing = compute_departmental_rows(db_path, student_status)
+    if unmapped:
+        raise ValueError("Result value(s) with no class: " + ", ".join(sorted(unmapped)))
+    if not rows:
+        print(f"No data found for the Departmental Report [{student_status}] in {db_path}.")
+        return None
+
+    pass_classes = [c for c in classes if c["counts_pass"]]
+    total_label = ("TOTAL (" + "+".join(c["name"].upper() for c in pass_classes) + ")") if pass_classes else None
+
+    styles = getSampleStyleSheet()
+    n_dyn = len(classes) + (1 if total_label else 0)
+    font_size = 8 if n_dyn <= 8 else 7
+    cell_style = styles["Normal"].clone("deptcell")
+    cell_style.fontSize = font_size
+    cell_style.leading = font_size + 2
+    cell_style.alignment = TA_CENTER
+    left_style = cell_style.clone("deptcellleft")
+    left_style.alignment = TA_LEFT
+    header_style = cell_style.clone("depthdr")
+    header_style.fontName = "Helvetica-Bold"
+
+    def P(text, style=cell_style):
+        return Paragraph(str(text) if text not in (None, "") else "&nbsp;", style)
+
+    def count_cell(n, appeared):
+        if not show_percentage:
+            return n
+        pct = (n / appeared * 100) if appeared else 0
+        pct_text = f"{pct:.1f}".rstrip("0").rstrip(".") if pct else "0"
+        return f"{n} ({pct_text}%)"
+
+    fixed = [("Year", 32), ("Program Code", 14), ("Semester", 22), ("No. of Enrolled Students", 18),
+             ("Total Appeared", 16), ("DIS/Not Appearing", 18)]
+    dyn_labels = [c["name"] for c in classes] + ([total_label] if total_label else [])
+    raw_widths = [w for _, w in fixed] + [(22 if show_percentage else 18)] * len(dyn_labels)
+    margin_mm = 4
+    scale = (297 - 2 * margin_mm) / sum(raw_widths)
+    col_widths = [w * scale * mm for w in raw_widths]
+
+    header = [P(label, header_style) for label, _ in fixed] + [P(l, header_style) for l in dyn_labels]
+    table_data = [header]
+    for r in rows:
+        line = [P(r["year_label"], left_style), P(program_code), P(r["semester_label"].title(), left_style),
+                P(r["enrolled"]), P(r["appeared"]), P(r["not_appearing"])]
+        line += [P(count_cell(r["class_counts"][c["id"]], r["appeared"])) for c in classes]
+        if total_label:
+            line.append(P(count_cell(r["total_pass"], r["appeared"])))
+        table_data.append(line)
+
+    style_cmds = [
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4472C4")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    if total_label:
+        style_cmds.append(("BACKGROUND", (len(table_data[0]) - 1, 1), (len(table_data[0]) - 1, -1),
+                           colors.HexColor("#D9E2F3")))
+
+    out_path = out_path or f"Departmental_Report{status_file_suffix(student_status)}.pdf"
+    doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
+                            leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
+                            topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
+    story = build_departmental_heading_flowables(department_name, rows[-1]["semester_label"], db_path)
+
+    wanted = resolve_status_filter(student_status)
+    story.append(Paragraph(f"Category: {wanted if wanted else 'All combined'}", styles["Heading3"]))
+    story.append(Spacer(1, 3))
+
+    gap_style = styles["Normal"].clone("deptgap")
+    gap_style.fontSize = 8
+    warn_style = gap_style.clone("deptgapwarn")
+    warn_style.textColor = colors.HexColor("#B30000")
+    for i, line in enumerate(_report_seating_gap_lines([r["semester_label"] for r in rows], student_status, db_path)):
+        story.append(Paragraph(line, warn_style if i > 0 else gap_style))
+    if missing:
+        story.append(Paragraph(
+            "WARNING: enrolled students not entered for: " + ", ".join(s.title() for s in missing)
+            + " -- No. of Enrolled / DIS-Not Appearing are not reliable for these semesters.", warn_style))
+    story.append(Spacer(1, 6))
+
+    t = Table(table_data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle(style_cmds))
+    story.append(t)
+    story.extend(build_report_end_flowables())
+    doc.build(story)
+    print(f"Saved PDF: {out_path}  (landscape A4, Departmental Report, [{student_status}], {len(rows)} semester row(s))")
     return out_path
 
 
@@ -8884,6 +10807,3216 @@ def run_report_mode():
         generate_bright_weak_pdf(DB_FILE, student_status=selection["bright_weak"],
                                  weak_threshold=selection["bw_weak_threshold"],
                                  bright_threshold=selection["bw_bright_threshold"])
+
+
+# ==========================================================
+# PARENT-CHILD SUBJECT MAPPING (Practical Time Table > Pre-requisites > Button 1)
+# ==========================================================
+# Built on the SAME institute_seating_chart.db as X Table mode -- reuses
+# its subject data as the catalog to pick parents from, but writes to
+# its own parent_child_subjects table (see ensure_institute_seating_chart_db).
+
+def get_subject_catalog(program_rows, semester_labels=None):
+    """From get_institute_seating_chart_for_program()'s output, builds
+    the semesterwise -> schemewise -> subject-triple catalog Section 2
+    displays as a checklist. Restricted to semester_labels if given
+    (Section 1's multi-select). Returns an ordered dict-like list:
+    [(semester_label, [(scheme, [(subject_code, level1, level2), ...]), ...]), ...]
+    in SEMESTER_NAMES order, schemes alphabetical, triples sorted.
+    """
+    catalog = {}
+    for r in program_rows:
+        if semester_labels is not None and r["semester_label"] not in semester_labels:
+            continue
+        for triple in r["subjects"]:
+            catalog.setdefault(r["semester_label"], {}).setdefault(r["scheme"], set()).add(triple)
+
+    ordered = []
+    for sem in SEMESTER_NAMES:
+        if sem not in catalog:
+            continue
+        scheme_list = [(scheme, sorted(triples)) for scheme, triples in sorted(catalog[sem].items())]
+        ordered.append((sem, scheme_list))
+    return ordered
+
+
+def save_parent_child_mapping(institute, year, session, program_code, semester_label, scheme,
+                               parent_subject, parent_level1, parent_level2, children):
+    """Replaces (delete-then-insert) the child list for ONE parent
+    subject, scoped to (program_code, semester_label, scheme, parent
+    triple). `children` is a list of child subject-name strings; blank
+    entries are dropped. Returns the number of children saved.
+    """
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        DELETE FROM parent_child_subjects
+        WHERE program_code=? AND semester_label=? AND scheme=?
+          AND parent_subject=? AND parent_level1=? AND parent_level2=?
+    """, (program_code, semester_label, scheme, parent_subject, parent_level1, parent_level2))
+    clean_children = [c.strip().upper() for c in children if c and c.strip()]
+    conn.executemany("""
+        INSERT INTO parent_child_subjects
+            (program_code, semester_label, scheme, parent_subject, parent_level1, parent_level2, child_subject)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, [(program_code, semester_label, scheme, parent_subject, parent_level1, parent_level2, c) for c in clean_children])
+    conn.commit()
+    conn.close()
+    return len(clean_children)
+
+
+def delete_parent_child_mapping(institute, year, session, program_code, semester_label, scheme,
+                                 parent_subject, parent_level1, parent_level2):
+    """Removes an entire parent's mapping (all its children) -- the
+    Section 4 "delete" action."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return 0
+    conn = sqlite3.connect(db_path)
+    cur = conn.execute("""
+        DELETE FROM parent_child_subjects
+        WHERE program_code=? AND semester_label=? AND scheme=?
+          AND parent_subject=? AND parent_level1=? AND parent_level2=?
+    """, (program_code, semester_label, scheme, parent_subject, parent_level1, parent_level2))
+    conn.commit()
+    conn.close()
+    return cur.rowcount
+
+
+def get_parent_child_mappings(institute, year, session, program_code, semester_labels=None):
+    """All saved parent-child mappings for this program code (optionally
+    restricted to semester_labels). Returns a list of dicts:
+    {"semester_label", "scheme", "parent_subject", "parent_level1",
+     "parent_level2", "children": [child_subject, ...]}, sorted by
+    semester_label, scheme, parent_subject.
+    """
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT semester_label, scheme, parent_subject, parent_level1, parent_level2, child_subject
+            FROM parent_child_subjects WHERE program_code = ?
+            ORDER BY semester_label, scheme, parent_subject, child_subject
+        """, (program_code,)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+
+    if semester_labels is not None:
+        rows = [r for r in rows if r["semester_label"] in semester_labels]
+
+    grouped = {}
+    order = []
+    for r in rows:
+        key = (r["semester_label"], r["scheme"], r["parent_subject"], r["parent_level1"], r["parent_level2"])
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(r["child_subject"])
+
+    return [
+        {
+            "semester_label": k[0], "scheme": k[1], "parent_subject": k[2],
+            "parent_level1": k[3], "parent_level2": k[4], "children": grouped[k],
+        }
+        for k in order
+    ]
+
+
+def expand_parent_child_subjects(institute, year, session, program_code, semester_label, scheme, triples):
+    """Applies the "children replace parent" rule: given a list of
+    (subject_code, level1, level2) triples for ONE semester+scheme,
+    returns a new list where any triple with a saved parent-child
+    mapping is replaced by its children (each child inheriting the
+    parent's level1/level2); triples with no mapping pass through
+    unchanged. For future consumers (e.g. X Table mode) that should
+    show children instead of a mapped parent -- not wired into any
+    screen yet.
+    """
+    mappings = get_parent_child_mappings(institute, year, session, program_code, [semester_label])
+    lookup = {
+        (m["parent_subject"], m["parent_level1"], m["parent_level2"]): m["children"]
+        for m in mappings if m["scheme"] == scheme
+    }
+    result = []
+    for t in triples:
+        if t in lookup:
+            subj, l1, l2 = t
+            for child in lookup[t]:
+                result.append((child, l1, l2))
+        else:
+            result.append(t)
+    return result
+
+
+# ==========================================================
+# PRACTICAL TIME TABLE -- exam dates + faculty availability (Sections 2.1/2.2)
+# ==========================================================
+
+def date_range_with_days(start_date_str, end_date_str):
+    """Expands a start/end date (YYYY-MM-DD strings) into every date in
+    between, inclusive, each paired with its day-of-week name. Returns
+    [] if the range is invalid (bad format or end before start).
+    """
+    try:
+        start = datetime.date.fromisoformat(start_date_str)
+        end = datetime.date.fromisoformat(end_date_str)
+    except (ValueError, TypeError):
+        return []
+    if end < start:
+        return []
+    out = []
+    d = start
+    while d <= end:
+        out.append((d.isoformat(), d.strftime("%A")))
+        d += datetime.timedelta(days=1)
+    return out
+
+
+# --------------------------------------------------------------------------
+# Semester-wise date ranges
+# --------------------------------------------------------------------------
+# A "group" = one Start/End date range + the semesters that share it + its per-date exam-day tick and session
+# times. A semester belongs to at most one group. A semester with no group has no exam slots at all and is
+# left out of the scheduling screens.
+#
+# A SLOT is (date, session_index). session_index is the position of the session's (start, end) window in the
+# date's UNION of windows over all groups (sorted). So two groups that use the same window on a date share
+# the same slot, and the rest of the scheduling code (which already works on (date, session_index)) is
+# unchanged. Whenever the groups change, the indexes are re-mapped (see _finalize_slot_change) so existing
+# assignments follow their window.
+# Limitation: two DIFFERENT windows on the same date that overlap in time (10:00-12:00 and 11:00-13:00) are
+# different slots, so a clash between them is not detected -- the save screen warns about this.
+
+def _sem_rank(sem):
+    return SEMESTER_NAMES.index(sem) if sem in SEMESTER_NAMES else 999
+
+
+def _load_groups(conn):
+    groups = {}
+    for gid, s, e in conn.execute("SELECT group_id, start_date, end_date FROM date_range_groups ORDER BY group_id"):
+        groups[gid] = {"group_id": gid, "start_date": s, "end_date": e, "semesters": [], "dates": []}
+    for gid, sem in conn.execute("SELECT group_id, semester_label FROM date_range_group_semesters"):
+        if gid in groups:
+            groups[gid]["semesters"].append(sem)
+    sess = {}
+    for gid, d, st, en in conn.execute(
+            "SELECT group_id, date, start_time, end_time FROM group_date_sessions ORDER BY group_id, date, session_index"):
+        sess.setdefault((gid, d), []).append((st, en))
+    for gid, d, day, ex in conn.execute("SELECT group_id, date, day, is_exam_day FROM group_dates ORDER BY group_id, date"):
+        if gid in groups:
+            groups[gid]["dates"].append({"date": d, "day": day, "is_exam_day": bool(ex), "sessions": sess.get((gid, d), [])})
+    for g in groups.values():
+        g["semesters"].sort(key=_sem_rank)
+    return sorted(groups.values(), key=lambda g: (g["start_date"], g["group_id"]))
+
+
+def _groups_union(groups):
+    """{date: [(start, end), ...] sorted} -- the windows of every exam day over all groups."""
+    union = {}
+    for g in groups:
+        for d in g["dates"]:
+            if d["is_exam_day"]:
+                for w in d["sessions"]:
+                    union.setdefault(d["date"], set()).add(tuple(w))
+    return {d: sorted(ws) for d, ws in union.items()}
+
+
+def _groups_slot_sets(groups, union=None):
+    """{semester_label: {(date, session_index), ...}} -- the slots each semester may use."""
+    union = union if union is not None else _groups_union(groups)
+    out = {}
+    for g in groups:
+        slots = set()
+        for d in g["dates"]:
+            if not d["is_exam_day"] or not (g["start_date"] <= d["date"] <= g["end_date"]):
+                continue
+            for w in d["sessions"]:
+                slots.add((d["date"], union[d["date"]].index(tuple(w))))
+        for sem in g["semesters"]:
+            out[sem] = set(slots)
+    return out
+
+
+def get_date_range_groups(institute, year, session):
+    """Every saved date-range group: [{"group_id","start_date","end_date","semesters","dates":[{"date","day",
+    "is_exam_day","sessions":[(start,end),...]}]}], earliest range first."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        groups = _load_groups(conn)
+    except sqlite3.OperationalError:
+        groups = []
+    conn.close()
+    return groups
+
+
+def get_semester_slot_sets(institute, year, session):
+    """{semester_label: {(date, session_index), ...}}. A semester that is absent has no date range."""
+    return _groups_slot_sets(get_date_range_groups(institute, year, session))
+
+
+def get_institute_semesters(institute, year, session):
+    """Semesters present anywhere in this Year/Session's Institute Seating Chart, in semester order."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT DISTINCT semester_label FROM institute_seating_chart").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return sorted({r[0] for r in rows if r[0]}, key=_sem_rank)
+
+
+def get_exam_dates(institute, year, session):
+    """The exam days and their sessions over ALL groups (windows merged per date, in order) -- what the slot
+    queue, the faculty-availability grid and the report display use. Same shape as before:
+    [{"date","day","is_exam_day" (always True here),"num_sessions","sessions":[(start,end),...]}], by date."""
+    groups = get_date_range_groups(institute, year, session)
+    union = _groups_union(groups)
+    day_of = {d["date"]: d["day"] for g in groups for d in g["dates"]}
+    return [
+        {"date": d, "day": day_of.get(d, ""), "is_exam_day": True, "num_sessions": len(ws), "sessions": list(ws)}
+        for d, ws in sorted(union.items())
+    ]
+
+
+def _delete_group_rows(conn, gid):
+    conn.execute("DELETE FROM date_range_group_semesters WHERE group_id = ?", (gid,))
+    conn.execute("DELETE FROM group_dates WHERE group_id = ?", (gid,))
+    conn.execute("DELETE FROM group_date_sessions WHERE group_id = ?", (gid,))
+    conn.execute("DELETE FROM date_range_groups WHERE group_id = ?", (gid,))
+
+
+def _overlap_warnings(groups):
+    warnings = []
+    for d, ws in sorted(_groups_union(groups).items()):
+        for i in range(len(ws)):
+            for j in range(i + 1, len(ws)):
+                if ws[j][0] < ws[i][1]:
+                    warnings.append(
+                        f"{format_date_ddmmyyyy(d)}: sessions {format_time_12hr(ws[i][0])}-{format_time_12hr(ws[i][1])} "
+                        f"and {format_time_12hr(ws[j][0])}-{format_time_12hr(ws[j][1])} overlap but are different "
+                        f"slots, so a student/workshop/faculty clash between them is NOT detected.")
+    return warnings
+
+
+def _finalize_slot_change(conn, old_groups):
+    """Called after the groups changed (same open connection/transaction). 1) Slot indexes are re-mapped so
+    every saved assignment keeps its own (date, window); an assignment whose window no longer exists is
+    cleared. 2) Any assignment of a semester that is now outside that semester's own date range (or the
+    semester no longer has a range) is cleared. Workshop/Faculty entries, batches and priorities are never
+    touched. Returns {"remapped","cleared_total","cleared_by_semester"}."""
+    old_u = _groups_union(old_groups)
+    new_groups = _load_groups(conn)
+    new_u = _groups_union(new_groups)
+    allowed = _groups_slot_sets(new_groups, new_u)
+    summary = {"remapped": 0, "cleared_total": 0, "cleared_by_semester": {}}
+
+    def map_slot(date, idx):
+        if idx is None or idx < 0 or date not in old_u or idx >= len(old_u[date]):
+            return None
+        w = old_u[date][idx]
+        lst = new_u.get(date)
+        return lst.index(w) if lst and w in lst else None
+
+    def cleared(sem):
+        summary["cleared_total"] += 1
+        summary["cleared_by_semester"][sem] = summary["cleared_by_semester"].get(sem, 0) + 1
+
+    # schedule_row_config (Pool R assignments) -- cleared by blanking, the row itself (Workshop/Faculty) stays
+    for rowid, sem, d, si in conn.execute(
+            "SELECT rowid, semester_label, assigned_date, assigned_session_index FROM schedule_row_config "
+            "WHERE assigned_date != ''").fetchall():
+        ni = map_slot(d, si)
+        if ni is None or (d, ni) not in allowed.get(sem, set()):
+            conn.execute("UPDATE schedule_row_config SET assigned_date='', assigned_session_index=-1 WHERE rowid=?",
+                         (rowid,))
+            cleared(sem)
+        elif ni != si:
+            conn.execute("UPDATE schedule_row_config SET assigned_session_index=? WHERE rowid=?", (ni, rowid))
+            summary["remapped"] += 1
+
+    for table in ("other_category_schedule", "individual_fallback_schedule"):
+        for rowid, sem, d, si in conn.execute(
+                f"SELECT rowid, semester_label, assigned_date, assigned_session_index FROM {table} "
+                f"WHERE assigned_date != ''").fetchall():
+            ni = map_slot(d, si)
+            if ni is None or (d, ni) not in allowed.get(sem, set()):
+                conn.execute(f"DELETE FROM {table} WHERE rowid=?", (rowid,))
+                cleared(sem)
+            elif ni != si:
+                conn.execute(f"UPDATE {table} SET assigned_session_index=? WHERE rowid=?", (ni, rowid))
+                summary["remapped"] += 1
+
+    # manual_schedule: unit_key = "<tag>|program|semester|scheme|subject|L1|L2|..." -> semester is part 2
+    for unit_key, d, si in conn.execute(
+            "SELECT unit_key, assigned_date, assigned_session_index FROM manual_schedule").fetchall():
+        parts = unit_key.split("|")
+        sem = parts[2] if len(parts) > 2 else ""
+        ni = map_slot(d, si)
+        if ni is None or (d, ni) not in allowed.get(sem, set()):
+            conn.execute("DELETE FROM manual_schedule WHERE unit_key=?", (unit_key,))
+            cleared(sem)
+        elif ni != si:
+            conn.execute("UPDATE manual_schedule SET assigned_session_index=? WHERE unit_key=?", (ni, unit_key))
+            summary["remapped"] += 1
+
+    # faculty availability ticks follow their window (global; a tick on a removed window is dropped)
+    old_ticks = conn.execute("SELECT faculty_name, date, session_index FROM faculty_availability").fetchall()
+    new_ticks = set()
+    for f, d, si in old_ticks:
+        ni = map_slot(d, si)
+        if ni is not None:
+            new_ticks.add((f, d, ni))
+    if new_ticks != set(old_ticks):
+        conn.execute("DELETE FROM faculty_availability")
+        conn.executemany("INSERT INTO faculty_availability (faculty_name, date, session_index) VALUES (?, ?, ?)",
+                         sorted(new_ticks))
+    return summary
+
+
+def save_date_range_group(institute, year, session, group_id, semesters, start_date, end_date, date_rows,
+                          dry_run=False):
+    """Creates (group_id None) or replaces one date-range group: its semesters, Start/End date and per-date
+    rows [{"date","day","is_exam_day","sessions":[(start,end),...]}]. A semester picked here is taken out of
+    any other group. Existing assignments are re-mapped / cleared as described in _finalize_slot_change.
+    dry_run=True changes nothing and only returns what WOULD be cleared. Returns that summary plus
+    "overlap_warnings"."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    old_groups = _load_groups(conn)
+    exists = group_id is not None and any(g["group_id"] == group_id for g in old_groups)
+    if exists:
+        conn.execute("UPDATE date_range_groups SET start_date=?, end_date=? WHERE group_id=?",
+                     (start_date, end_date, group_id))
+        conn.execute("DELETE FROM date_range_group_semesters WHERE group_id=?", (group_id,))
+        conn.execute("DELETE FROM group_dates WHERE group_id=?", (group_id,))
+        conn.execute("DELETE FROM group_date_sessions WHERE group_id=?", (group_id,))
+        gid = group_id
+    else:
+        gid = conn.execute("INSERT INTO date_range_groups (start_date, end_date) VALUES (?, ?)",
+                           (start_date, end_date)).lastrowid
+    for sem in semesters:
+        conn.execute("DELETE FROM date_range_group_semesters WHERE semester_label=?", (sem,))
+        conn.execute("INSERT INTO date_range_group_semesters (group_id, semester_label) VALUES (?, ?)", (gid, sem))
+    for (other,) in conn.execute(
+            "SELECT group_id FROM date_range_groups WHERE group_id NOT IN "
+            "(SELECT group_id FROM date_range_group_semesters)").fetchall():
+        _delete_group_rows(conn, other)  # a group left with no semester disappears
+    for r in date_rows:
+        conn.execute("INSERT INTO group_dates (group_id, date, day, is_exam_day) VALUES (?, ?, ?, ?)",
+                     (gid, r["date"], r["day"], 1 if r["is_exam_day"] else 0))
+        for si, (st, en) in enumerate(r.get("sessions") or []):
+            conn.execute(
+                "INSERT INTO group_date_sessions (group_id, date, session_index, start_time, end_time) "
+                "VALUES (?, ?, ?, ?, ?)", (gid, r["date"], si, st, en))
+    summary = _finalize_slot_change(conn, old_groups)
+    summary["overlap_warnings"] = _overlap_warnings(_load_groups(conn))
+    summary["group_id"] = gid
+    if dry_run:
+        conn.rollback()
+    else:
+        conn.commit()
+    conn.close()
+    return summary
+
+
+def delete_date_range_group(institute, year, session, group_id, dry_run=False):
+    """Removes a group (its semesters then have no date range). Same re-map/clear + dry_run as saving."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    old_groups = _load_groups(conn)
+    _delete_group_rows(conn, group_id)
+    summary = _finalize_slot_change(conn, old_groups)
+    summary["overlap_warnings"] = []
+    if dry_run:
+        conn.rollback()
+    else:
+        conn.commit()
+    conn.close()
+    return summary
+
+
+# ==========================================================
+# PRACTICAL TIME TABLE -- batching (Section 2.3)
+# ==========================================================
+# Sort/grouping rule for this feature: wherever Program Code is itself
+# a variable grouping level, the hierarchy is Program Code -> Semester
+# -> Scheme -> Enrollment (ascending, innermost).
+
+def compute_default_batch_sizes(total_students, num_batches):
+    """Splits total_students across num_batches as evenly as possible,
+    remainder-first: 25 students / 3 batches -> [9, 8, 8]. Returns []
+    for non-positive inputs. Kept as a shared helper -- reused by
+    compute_default_seat_batches() for the current seat-number-range
+    batching model (Phase O); the old per-subject-count batching
+    functions that used to call this directly have been removed.
+    """
+    if num_batches <= 0 or total_students <= 0:
+        return []
+    base = total_students // num_batches
+    remainder = total_students % num_batches
+    return [base + 1 if i < remainder else base for i in range(num_batches)]
+
+
+def compress_seat_number_ranges(seat_numbers):
+    """Compresses a list of seat numbers into a display string where
+    consecutive runs collapse into ranges and any break starts a new
+    group: [1,2,3,4,7,8,9,11,13] -> "1-4, 7-9, 11, 13". Non-numeric or
+    blank seat numbers are ignored. Returns "" if nothing numeric.
+    """
+    nums = sorted({int(n) for n in seat_numbers if str(n).strip().lstrip("-").isdigit()})
+    if not nums:
+        return ""
+    groups = []
+    start = prev = nums[0]
+    for n in nums[1:]:
+        if n == prev + 1:
+            prev = n
+            continue
+        groups.append((start, prev))
+        start = prev = n
+    groups.append((start, prev))
+    return ", ".join(f"{a}-{b}" if a != b else f"{a}" for a, b in groups)
+
+
+# ==========================================================
+# PRACTICAL TIME TABLE -- Batch Setup (Phase O): fixed seat-number-range
+# batching, shared uniformly across every subject in one Program+
+# Semester+Scheme group. Supersedes the per-subject-count batching
+# below (batches/compute_default_batch_sizes/etc, kept temporarily
+# until Section 4 is rewired in Phase P) -- a seat number's batch
+# membership is now a single consistent fact, never per-subject.
+# ==========================================================
+
+BATCH_BASE_CATEGORY = "R"   # the one category that forms the schedulable batches
+
+
+def get_institute_categories(institute, year, session):
+    """Unique raw category values found in this Year+Session's institute seating chart."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT DISTINCT status FROM institute_seating_chart").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return order_categories({r[0] for r in rows if r[0]})
+
+
+def get_r_equivalent_categories(institute, year, session):
+    """Categories saved as 'counts as R' for this whole Year+Session database."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return set()
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT category FROM category_equivalence").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return {r[0] for r in rows}
+
+
+def save_r_equivalent_categories(institute, year, session, categories):
+    """Replaces the saved equivalence list (categories that count as R)."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM category_equivalence")
+    conn.executemany(
+        "INSERT OR IGNORE INTO category_equivalence (category) VALUES (?)",
+        [(c,) for c in categories if c and c != BATCH_BASE_CATEGORY],
+    )
+    conn.commit()
+    conn.close()
+
+
+def clear_scheduling_for_categories(institute, year, session, categories):
+    """Called when an equivalence changes: for every (program, semester, scheme) that
+    has students in a changed category, deletes the R-group batches and the changed
+    category's own batches, the Pool placements, and the assigned Day/Time. Typed
+    Workshop/Faculty text is kept. Returns the number of combinations cleared."""
+    categories = [c for c in categories if c]
+    if not categories:
+        return 0
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    ph = ",".join("?" * len(categories))
+    combos = conn.execute(
+        f"SELECT DISTINCT program_code, semester_label, scheme FROM institute_seating_chart WHERE status IN ({ph})",
+        categories,
+    ).fetchall()
+    for pc, sem, scheme in combos:
+        conn.execute(
+            f"DELETE FROM seat_number_batches WHERE program_code=? AND semester_label=? AND scheme=? "
+            f"AND (category=? OR category IN ({ph}))",
+            [pc, sem, scheme, BATCH_BASE_CATEGORY, *categories],
+        )
+        conn.execute(
+            "DELETE FROM pool_x_assignments WHERE program_code=? AND semester_label=? AND scheme=?",
+            (pc, sem, scheme),
+        )
+        conn.execute(
+            "UPDATE schedule_row_config SET assigned_date='', assigned_session_index=-1 "
+            "WHERE program_code=? AND semester_label=? AND scheme=?",
+            (pc, sem, scheme),
+        )
+    conn.commit()
+    conn.close()
+    return len(combos)
+
+
+def get_category_pools(institute, year, session, program_code, semester_label, scheme):
+    """Splits every student of this Program Code + Semester + Scheme into batch
+    groups: 'R' (the batched category, INCLUDING every category set equivalent to
+    it) and one group per other raw category. Students with a non-numeric seat
+    number are left out (they can't sit in a numeric seat range).
+
+    Returns an ordered {group: [entry, ...]} -- 'R' first (if present), then the
+    other groups alphabetically. Each entry: {"enrollment", "seat_number",
+    "status" (the RAW category), "group"}, sorted by seat number."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    equiv = get_r_equivalent_categories(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT enrollment, student_name, seat_number, status FROM institute_seating_chart
+            WHERE program_code=? AND semester_label=? AND scheme=?
+        """, (program_code, semester_label, scheme)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+
+    pools = {}
+    for r in rows:
+        _name, seat_value, _swapped = fix_swapped_name_seat(r["student_name"], r["seat_number"])
+        if not str(seat_value).strip().lstrip("-").isdigit():
+            continue
+        raw = r["status"]
+        group = BATCH_BASE_CATEGORY if (raw == BATCH_BASE_CATEGORY or raw in equiv) else raw
+        pools.setdefault(group, []).append(
+            {"enrollment": r["enrollment"], "seat_number": seat_value, "status": raw, "group": group}
+        )
+    for lst in pools.values():
+        lst.sort(key=lambda x: int(str(x["seat_number"]).strip()))
+
+    ordered = {}
+    if BATCH_BASE_CATEGORY in pools:
+        ordered[BATCH_BASE_CATEGORY] = pools[BATCH_BASE_CATEGORY]
+    for g in sorted((g for g in pools if g != BATCH_BASE_CATEGORY), key=lambda c: (c.lower(), c)):
+        ordered[g] = pools[g]
+    return ordered
+
+
+def get_seat_number_pools(institute, year, session, program_code, semester_label, scheme):
+    """(pool_r, pool_x): pool_r = the R group (R plus its equivalents), pool_x = every
+    student of every OTHER category together. Kept for the scheduling code that only
+    distinguishes 'R' from 'not R'."""
+    pools = get_category_pools(institute, year, session, program_code, semester_label, scheme)
+    pool_r = pools.get(BATCH_BASE_CATEGORY, [])
+    pool_x = sorted(
+        (e for g, lst in pools.items() if g != BATCH_BASE_CATEGORY for e in lst),
+        key=lambda x: int(x["seat_number"]),
+    )
+    return pool_r, pool_x
+
+
+def compute_default_seat_batches(seat_pool, num_batches):
+    """Splits the SORTED seat_pool into num_batches contiguous chunks
+    (remainder-first sizing, same convention as compute_default_batch_sizes
+    -- e.g. 25/3 -> chunk sizes [9,8,8]), then returns each chunk's own
+    (start_seat, end_seat) as the actual min/max seat number in that
+    chunk. Returns [] for an empty pool or non-positive num_batches.
+    """
+    if not seat_pool or num_batches <= 0:
+        return []
+    sizes = compute_default_batch_sizes(len(seat_pool), num_batches)
+    result = []
+    idx = 0
+    for size in sizes:
+        chunk = seat_pool[idx:idx + size]
+        if chunk:
+            result.append((chunk[0], chunk[-1]))
+        idx += size
+    return result
+
+
+def save_seat_number_batches(institute, year, session, program_code, semester_label, scheme, batch_ranges,
+                             category=BATCH_BASE_CATEGORY):
+    """Replaces the batch Start/End seat ranges for ONE Program Code + Semester +
+    Scheme + category group ('R' or any other raw category)."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        DELETE FROM seat_number_batches WHERE program_code=? AND semester_label=? AND scheme=? AND category=?
+    """, (program_code, semester_label, scheme, category))
+    conn.executemany("""
+        INSERT INTO seat_number_batches (program_code, semester_label, scheme, category, batch_index, start_seat, end_seat)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, [(program_code, semester_label, scheme, category, i, s, e) for i, (s, e) in enumerate(batch_ranges)])
+    conn.commit()
+    conn.close()
+
+
+def get_seat_number_batches(institute, year, session, program_code, semester_label, scheme,
+                            category=BATCH_BASE_CATEGORY):
+    """Saved (start_seat, end_seat) ranges, in order, for one category group. The
+    default 'R' group is what all scheduling (workshop/faculty, Day & Time, report) uses."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("""
+            SELECT start_seat, end_seat FROM seat_number_batches
+            WHERE program_code=? AND semester_label=? AND scheme=? AND category=?
+            ORDER BY batch_index
+        """, (program_code, semester_label, scheme, category)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return [(r[0], r[1]) for r in rows]
+
+
+def get_all_seat_number_batch_configs(institute, year, session):
+    """Every saved Batch Setup configuration: list of {"program_code",
+    "semester_label", "scheme", "category", "ranges": [(start, end), ...]}."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT program_code, semester_label, scheme, category, batch_index, start_seat, end_seat
+            FROM seat_number_batches ORDER BY program_code, semester_label, scheme, category, batch_index
+        """).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+
+    grouped, order = {}, []
+    for r in rows:
+        key = (r["program_code"], r["semester_label"], r["scheme"], r["category"])
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append((r["start_seat"], r["end_seat"]))
+    sem_index = {s: i for i, s in enumerate(SEMESTER_NAMES)}
+    order.sort(key=lambda k: (k[0], sem_index.get(k[1], 999), k[2], k[3]))
+    return [{"program_code": k[0], "semester_label": k[1], "scheme": k[2], "category": k[3],
+             "ranges": grouped[k]} for k in order]
+
+
+def delete_seat_number_batch_config(institute, year, session, program_code, semester_label, scheme, category=None):
+    """Removes saved batches for one combination -- every category group, or just
+    `category` if given."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return 0
+    conn = sqlite3.connect(db_path)
+    if category is None:
+        cur = conn.execute("""
+            DELETE FROM seat_number_batches WHERE program_code=? AND semester_label=? AND scheme=?
+        """, (program_code, semester_label, scheme))
+    else:
+        cur = conn.execute("""
+            DELETE FROM seat_number_batches WHERE program_code=? AND semester_label=? AND scheme=? AND category=?
+        """, (program_code, semester_label, scheme, category))
+    conn.commit()
+    conn.close()
+    return cur.rowcount
+
+
+def get_students_in_seat_range(students, start_seat, end_seat):
+    """Filters a get_students_for_subject()-style list down to just
+    those whose (numeric) seat_number falls within [start_seat, end_seat]
+    inclusive -- this is how one subject's own appearing students get
+    split against the SHARED Batch Setup ranges (Phase P). Non-numeric
+    seat numbers never match. Order is preserved from the input list.
+    """
+    result = []
+    for s in students:
+        try:
+            n = int(s["seat_number"])
+        except (ValueError, TypeError):
+            continue
+        if start_seat <= n <= end_seat:
+            result.append(s)
+    return result
+
+
+# ==========================================================
+# PRACTICAL TIME TABLE -- subject filter + scheduling matrix (Sections 3/4)
+# ==========================================================
+
+def save_schedule_row_config(institute, year, session, program_code, semester_label, scheme, subject, level1, level2,
+                              category, batch_index, workshop_name, faculty_name):
+    """Upserts ONE (subject, category, batch)'s Workshop/Faculty free text so it
+    persists and reloads on revisit. Every raw category (R, X, OTO, ...) gets its
+    own row here -- not just R -- so a semester with no R students at all can still
+    have its X (or whatever category IS present) batches entered directly.
+    Workshop/Faculty suggestion lists (get_workshop_suggestions/get_faculty_suggestions)
+    are derived directly from this table's own saved values -- no separate
+    suggestion-only table needed.
+    """
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO schedule_row_config
+            (program_code, semester_label, scheme, subject, level1, level2, category, batch_index,
+             workshop_name, faculty_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(program_code, semester_label, scheme, subject, level1, level2, category, batch_index)
+        DO UPDATE SET workshop_name=excluded.workshop_name, faculty_name=excluded.faculty_name
+    """, (program_code, semester_label, scheme, subject, level1, level2, category, batch_index,
+          workshop_name, faculty_name))
+    conn.commit()
+    conn.close()
+
+
+def get_schedule_row_configs(institute, year, session):
+    """All saved Workshop/Faculty + assigned Day/Time rows for this institute+year+
+    session, ACROSS EVERY CATEGORY.
+    Returns {(program_code, semester_label, scheme, subject, level1, level2,
+    category, batch_index): {"workshop_name", "faculty_name",
+    "assigned_date", "assigned_session_index"}}.
+    """
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT program_code, semester_label, scheme, subject, level1, level2, category, batch_index,
+                   workshop_name, faculty_name, assigned_date, assigned_session_index
+            FROM schedule_row_config
+        """).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return {
+        (r["program_code"], r["semester_label"], r["scheme"], r["subject"], r["level1"], r["level2"],
+         r["category"], r["batch_index"]): {
+            "workshop_name": r["workshop_name"], "faculty_name": r["faculty_name"],
+            "assigned_date": r["assigned_date"], "assigned_session_index": r["assigned_session_index"],
+        }
+        for r in rows
+    }
+
+
+def clear_all_schedule_row_configs(institute, year, session):
+    """Deletes EVERY saved workshop/faculty entry (and the Day/Time assigned from them,
+    and any pool placements) for this Year+Session database. Batches are untouched.
+    Used when the demonstration auto-fill is switched off. Returns rows deleted."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return 0
+    conn = sqlite3.connect(db_path)
+    try:
+        n = conn.execute("DELETE FROM schedule_row_config").rowcount
+    except sqlite3.OperationalError:
+        n = 0
+    try:
+        conn.execute("DELETE FROM pool_x_assignments")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+    return n
+
+
+def get_workshop_suggestions(institute, year, session):
+    """Distinct, non-blank Workshop names typed anywhere in Section 4
+    so far -- the growing suggestion list."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT workshop_name FROM schedule_row_config WHERE workshop_name != '' ORDER BY workshop_name"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def get_faculty_suggestions(institute, year, session):
+    """Distinct, non-blank Faculty names typed anywhere in Section 4 so
+    far -- the growing suggestion list."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT faculty_name FROM schedule_row_config WHERE faculty_name != '' ORDER BY faculty_name"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def default_semester_priority_order(session, semesters_present):
+    """Default priority ORDER (first = highest priority) for the semesters actually
+    present, given the session: even -> 6th,4th,2nd then 5th,3rd,1st; odd -> 5th,3rd,1st
+    then 6th,4th,2nd. Uneven/mixed data just keeps whichever of these two lists the
+    semester falls into, in that relative order."""
+    even_order = ["FINAL SEMESTER", "FOURTH SEMESTER", "SECOND SEMESTER",
+                  "FIFTH SEMESTER", "THIRD SEMESTER", "FIRST SEMESTER"]
+    odd_order = ["FIFTH SEMESTER", "THIRD SEMESTER", "FIRST SEMESTER",
+                 "FINAL SEMESTER", "FOURTH SEMESTER", "SECOND SEMESTER"]
+    base = even_order if (session or "").strip().lower() == "even" else odd_order
+    present = set(semesters_present)
+    ordered = [s for s in base if s in present]
+    ordered += [s for s in semesters_present if s not in ordered]  # any unrecognized label, kept last
+    return ordered
+
+
+def get_semester_priority(institute, year, session, semesters_present):
+    """{semester_label: priority} (1 = highest). Falls back to the session default
+    for any semester with nothing saved yet."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    saved = {}
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        try:
+            saved = dict(conn.execute("SELECT semester_label, priority FROM semester_priority").fetchall())
+        except sqlite3.OperationalError:
+            pass
+        conn.close()
+    default_order = default_semester_priority_order(session, semesters_present)
+    result = {}
+    for i, sem in enumerate(default_order, start=1):
+        result[sem] = saved.get(sem, i)
+    return result
+
+
+def save_semester_priority(institute, year, session, priorities):
+    """priorities: {semester_label: priority} -- replaces the saved set wholesale."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM semester_priority")
+    conn.executemany(
+        "INSERT INTO semester_priority (semester_label, priority) VALUES (?, ?)",
+        list(priorities.items()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_semester_priority(institute, year, session):
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM semester_priority")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def compute_subject_category_counts(institute, year, session, program_code, semester_label, subject):
+    """{category: count} of students appearing for this subject code (any level, any
+    scheme) in this program+semester -- shown next to the subject in the priority
+    matrix so the user can judge priority by size."""
+    rows = get_institute_seating_chart_for_program(institute, year, session, program_code)
+    rows = [r for r in rows if r["semester_label"] == semester_label]
+    counts = {}
+    for r in rows:
+        expanded = expand_parent_child_subjects(institute, year, session, program_code, semester_label, r["scheme"], r["subjects"])
+        if any(t[0] == subject for t in expanded):
+            counts[r["status"]] = counts.get(r["status"], 0) + 1
+    return order_categories_with_counts(counts)
+
+
+def order_categories_with_counts(counts):
+    return [(c, counts[c]) for c in order_categories(counts.keys())]
+
+
+def get_subject_priority(institute, year, session):
+    """{(program_code, semester_label, subject): priority}"""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT program_code, semester_label, subject, priority FROM subject_priority").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return {(r[0], r[1], r[2]): r[3] for r in rows}
+
+
+def save_subject_priority(institute, year, session, program_code, semester_label, priorities):
+    """priorities: {subject: priority} for ONE program+semester -- replaces just
+    that program+semester's saved priorities."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "DELETE FROM subject_priority WHERE program_code=? AND semester_label=?",
+        (program_code, semester_label),
+    )
+    conn.executemany(
+        "INSERT INTO subject_priority (program_code, semester_label, subject, priority) VALUES (?, ?, ?, ?)",
+        [(program_code, semester_label, subj, p) for subj, p in priorities.items() if p is not None],
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_subject_priority(institute, year, session, program_code, semester_label):
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "DELETE FROM subject_priority WHERE program_code=? AND semester_label=?",
+        (program_code, semester_label),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_faculty_roster(institute, year, session):
+    """Every faculty name ever saved in Workshop/Faculty Entry, alphabetical, with the
+    program codes each one teaches in (for display in the availability matrix)."""
+    configs = get_schedule_row_configs(institute, year, session)
+    programs_by_faculty = {}
+    for rid, cfg in configs.items():
+        name = cfg.get("faculty_name")
+        if name:
+            programs_by_faculty.setdefault(name, set()).add(rid[0])
+    return [{"faculty_name": n, "programs": sorted(programs_by_faculty[n])} for n in sorted(programs_by_faculty)]
+
+
+def get_faculty_availability(institute, year, session):
+    """{(faculty_name, date, session_index): True} -- only TICKED (available) cells
+    are stored; anything absent is NOT available."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT faculty_name, date, session_index FROM faculty_availability").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return {(r[0], r[1], r[2]): True for r in rows}
+
+
+def save_faculty_availability(institute, year, session, available_set):
+    """available_set: set of (faculty_name, date, session_index) -- replaces the
+    WHOLE saved matrix (the UI sends the full current tick-state each Save)."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM faculty_availability")
+    conn.executemany(
+        "INSERT OR IGNORE INTO faculty_availability (faculty_name, date, session_index) VALUES (?, ?, ?)",
+        list(available_set),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_faculty_availability(institute, year, session):
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM faculty_availability")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def get_day_slot_queue(institute, year, session):
+    """Builds the shared, ordered Day+Time-Slot queue that Assign Day &
+    Time consumes -- every EXAM day (is_exam_day checked, from Section
+    2.1) expanded into its own sessions, in day order then session
+    order. Returns a list of dicts: {"date", "day", "session_index",
+    "start_time", "end_time"}.
+    """
+    queue = []
+    for d in get_exam_dates(institute, year, session):
+        if not d["is_exam_day"]:
+            continue
+        for session_index, (start_time, end_time) in enumerate(d["sessions"]):
+            queue.append({
+                "date": d["date"], "day": d["day"], "session_index": session_index,
+                "start_time": start_time, "end_time": end_time,
+            })
+    return queue
+
+
+def get_category_batch_members(institute, year, session, program_code, semester_label, scheme, subject, level1, level2,
+                               category, batch_index):
+    """Members of ONE (subject, category, batch) -- students appearing for this
+    subject (expand_parent_child_subjects-aware) whose raw category falls in this
+    batch GROUP (category=='R' means R plus its equivalents, same grouping
+    get_category_pools() uses), restricted to that batch's own seat-number range.
+    Returns [{"enrollment", "seat_number"}, ...]."""
+    ranges = get_seat_number_batches(institute, year, session, program_code, semester_label, scheme, category=category)
+    if batch_index >= len(ranges):
+        return []
+    start, end = ranges[batch_index]
+    subject_students = {
+        s["enrollment"] for s in
+        get_students_for_subject(institute, year, session, program_code, semester_label, scheme, subject, level1, level2)
+    }
+    pools = get_category_pools(institute, year, session, program_code, semester_label, scheme)
+    group_members = pools.get(category, [])
+    return [
+        {"enrollment": e["enrollment"], "seat_number": e["seat_number"]}
+        for e in group_members
+        if e["enrollment"] in subject_students and start <= int(e["seat_number"]) <= end
+    ]
+
+
+def get_subject_workshop_faculty(row_configs, subject):
+    """The (workshop, faculty) already saved for this subject code, from ANY of its
+    rows (they're all meant to be identical -- see the same-subject-code rule).
+    Returns ("", "") if nothing saved for it yet."""
+    for rid in sorted(row_configs):
+        if rid[3] == subject:
+            cfg = row_configs[rid]
+            if cfg.get("workshop_name") and cfg.get("faculty_name"):
+                return cfg["workshop_name"], cfg["faculty_name"]
+    return "", ""
+
+
+def get_institute_timetable_reports_dir(institute, year, session, base_dir="."):
+    """Where Practical Time Table PDFs (Workshop/Faculty, the schedule matrix)
+    are saved -- a 'reports' subfolder right next to that institute+year+
+    session's own institute_seating_chart.db. Created on demand."""
+    db_path = institute_seating_chart_db_path(institute, year, session, base_dir)
+    reports_dir = os.path.join(os.path.dirname(db_path), "reports")
+    os.makedirs(reports_dir, exist_ok=True)
+    return reports_dir
+
+
+def generate_workshop_faculty_pdf(institute, year, session, matrix_rows, out_path=None):
+    """Print-ready landscape A4 PDF of the Workshop/Faculty Entry table -- every
+    subject's batch, in every category, with whatever Workshop/Faculty is
+    currently saved for it (falling back, like the on-screen table does, to
+    any other saved entry for the same subject code when this exact batch's
+    own entry is blank). One row per (program/semester/scheme, category,
+    subject, batch) actually in use.
+    """
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+
+    row_configs = get_schedule_row_configs(institute, year, session)
+    combos = sorted(
+        {(r["program_code"], r["semester_label"], r["scheme"]) for r in matrix_rows},
+        key=lambda c: (c[0], semester_number(c[1]) or 999, c[2]),
+    )
+
+    entries = []
+    for pc, sem, scheme in combos:
+        for row in [r for r in matrix_rows if (r["program_code"], r["semester_label"], r["scheme"]) == (pc, sem, scheme)]:
+            pools = get_category_pools(institute, year, session, pc, sem, scheme)
+            for category in pools:
+                seat_ranges = get_seat_number_batches(institute, year, session, pc, sem, scheme, category=category)
+                for bi in range(len(seat_ranges)):
+                    members = get_category_batch_members(
+                        institute, year, session, pc, sem, scheme, row["subject"], row["level1"], row["level2"],
+                        category, bi,
+                    )
+                    if not members:
+                        continue
+                    cfg = row_configs.get(
+                        (pc, sem, scheme, row["subject"], row["level1"], row["level2"], category, bi), {}
+                    )
+                    workshop, faculty = cfg.get("workshop_name", ""), cfg.get("faculty_name", "")
+                    if not (workshop and faculty):
+                        workshop, faculty = get_subject_workshop_faculty(row_configs, row["subject"])
+                    entries.append({
+                        "pc": pc, "sem": sem, "scheme": scheme, "category": category,
+                        "subject": row["subject"], "level1": row["level1"], "level2": row["level2"],
+                        "batch_label": f"B{bi + 1}", "total": len(members),
+                        "workshop": workshop, "faculty": faculty,
+                    })
+
+    styles = getSampleStyleSheet()
+    font_size = 8
+    cell_style = styles["Normal"].clone("wfcell")
+    cell_style.fontSize = font_size
+    cell_style.leading = font_size + 2
+    cell_style.alignment = TA_CENTER
+    left_style = cell_style.clone("wfcellleft")
+    left_style.alignment = TA_LEFT
+    header_style = cell_style.clone("wfhdr")
+    header_style.fontName = "Helvetica-Bold"
+
+    def P(text, style=cell_style):
+        return Paragraph(str(text) if text not in (None, "") else "&nbsp;", style)
+
+    COLUMNS = [
+        ("Program", 14), ("Semester", 20), ("Scheme", 10), ("Category", 12), ("Subject", 16),
+        ("L1", 10), ("L2", 10), ("Batch", 10), ("Students", 12), ("Workshop", 20), ("Faculty", 20),
+    ]
+    page_w_mm, margin_mm = 297, 8
+    usable_w_mm = page_w_mm - 2 * margin_mm
+    scale = usable_w_mm / sum(w for _, w in COLUMNS)
+    col_widths = [w * scale * mm for _, w in COLUMNS]
+
+    out_path = out_path or os.path.join(
+        get_institute_timetable_reports_dir(institute, year, session), "Workshop_Faculty_Entry.pdf"
+    )
+    doc = SimpleDocTemplate(out_path, pagesize=landscape(A4),
+                             leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
+                             topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
+    story = [
+        Paragraph(f"Workshop / Faculty Entry -- {year} / {session}", styles["Heading2"]),
+        Spacer(1, 4 * mm),
+    ]
+    header = [P(label, header_style) for label, _ in COLUMNS]
+    table_data = [header]
+    style_cmds = [
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4472C4")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.5), ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+    ]
+    for e in entries:
+        table_data.append([
+            P(e["pc"]), P(e["sem"].title()), P(e["scheme"]), P(e["category"]),
+            P(e["subject"], left_style), P(e["level1"]), P(e["level2"]), P(e["batch_label"]),
+            P(e["total"]), P(e["workshop"] or "--", left_style), P(e["faculty"] or "--", left_style),
+        ])
+        if not (e["workshop"] and e["faculty"]):
+            style_cmds.append(("BACKGROUND", (9, len(table_data) - 1), (10, len(table_data) - 1),
+                                colors.HexColor("#FFE0B2")))
+
+    t = Table(table_data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle(style_cmds))
+    story.append(t)
+    doc.build(story)
+    return out_path
+
+
+def generate_practical_timetable_pdf(snapshot_rows, unresolved_rows, institute, year, session, out_path=None,
+                                     title_suffix=""):
+    """Print-ready landscape A4 PDF of the Practical Time Table Report matrix --
+    exactly the rows already computed for the on-screen table (snapshot_rows,
+    each a dict as built by app.py's build_schedule_report_snapshot(), seat
+    range HTML bold-markup included since ReportLab's Paragraph understands
+    plain <b> tags directly), plus the same Unresolved list underneath.
+    """
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+
+    styles = getSampleStyleSheet()
+    font_size = 6.5
+    cell_style = styles["Normal"].clone("ptcell")
+    cell_style.fontSize = font_size
+    cell_style.leading = font_size + 1.5
+    cell_style.alignment = TA_CENTER
+    left_style = cell_style.clone("ptcellleft")
+    left_style.alignment = TA_LEFT
+    header_style = cell_style.clone("pthdr")
+    header_style.fontName = "Helvetica-Bold"
+
+    def P(text, style=cell_style):
+        return Paragraph(str(text) if text not in (None, "") else "&nbsp;", style)
+
+    COLUMNS = [
+        ("Sr.No", 6), ("Date", 14), ("Day", 10), ("Time", 20), ("Year", 14), ("Session", 10),
+        ("Prog/Sem/Scheme", 16), ("Category", 10), ("Total", 8), ("Batch", 12), ("Seat Range", 20),
+        ("Batch Total", 8), ("Subject", 12), ("L1", 8), ("L2", 8), ("Workshop", 18), ("Faculty", 18),
+        ("Remarks", 24),
+    ]
+    page_w_mm, margin_mm = 297, 6
+    usable_w_mm = page_w_mm - 2 * margin_mm
+    scale = usable_w_mm / sum(w for _, w in COLUMNS)
+    col_widths = [w * scale * mm for _, w in COLUMNS]
+
+    out_path = out_path or os.path.join(
+        get_institute_timetable_reports_dir(institute, year, session), "Practical_Time_Table.pdf"
+    )
+    from reportlab.platypus.doctemplate import LayoutError
+
+    def make_doc():
+        return SimpleDocTemplate(out_path, pagesize=landscape(A4),
+                                 leftMargin=margin_mm * mm, rightMargin=margin_mm * mm,
+                                 topMargin=margin_mm * mm, bottomMargin=margin_mm * mm)
+
+    # ---- Order of the PDF rows: date (earliest first; unscheduled rows last) ->
+    # program code (A-Z) -> semester (highest first) -> scheme -> category -> level 1 -> level 2 ->
+    # subject -> batch. Sr.No is renumbered in this order. (The on-screen report is unchanged.)
+    def _sort_key(r):
+        try:
+            d = datetime.datetime.strptime(r.get("date", ""), "%d-%m-%Y").date().isoformat()
+            has_date = 0
+        except (ValueError, TypeError):
+            d, has_date = "9999-99-99", 1
+        parts = (r.get("compact_code") or "").split("-")
+        pc = parts[0] if parts else ""
+        sem = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        scheme = parts[2] if len(parts) > 2 else ""
+        bm = re.search(r"\d+", r.get("batch_label") or "")
+        return (has_date, d, pc, -sem, scheme, (r.get("category") or "").lower(),
+                r.get("category") or "", r.get("level1") or "", r.get("level2") or "",
+                r.get("subject") or "", int(bm.group(0)) if bm else 10 ** 6)
+
+    # ---- One section per PROGRAM CODE, each starting on a new page, with its own Sr.No 1, 2, 3 ...
+    def _pc_of(r):
+        return (r.get("compact_code") or "").split("-")[0]
+
+    program_codes = sorted({_pc_of(r) for r in snapshot_rows}, key=lambda x: (x.lower(), x))
+    groups = []
+    for pc in program_codes:
+        grp = sorted([r for r in snapshot_rows if _pc_of(r) == pc], key=_sort_key)
+        groups.append((pc, [dict(r, sr_no=i) for i, r in enumerate(grp, start=1)]))
+
+    # ---- Vertical merging: consecutive rows with the same value share ONE merged cell. A column only
+    # merges while every column "above" it in the hierarchy also matches, and it restarts at each new
+    # date, so a merged cell never spans two dates (or two programs). depth = how much of
+    # the chain must match.
+    def _chain(r):
+        a = (r["date"],)
+        b = a + (r["compact_code"],)
+        c = b + (r["category"],)
+        d = c + (r["level1"],)
+        e = d + (r["level2"],)
+        return a, b, c, d, e
+
+    MERGE_COLS = {1: 0, 2: 0, 4: 0, 5: 0, 6: 1, 7: 2, 13: 3, 14: 4}  # column index -> chain depth
+
+    def build_story(max_run):
+        """max_run caps how many rows one merged cell may cover (a merged cell can't be split across
+        pages, so a very long day is cut into chunks and the value repeats at the start of each)."""
+        story = []
+        for g_i, (pc, rows) in enumerate(groups):
+            if g_i > 0:
+                story.append(PageBreak())  # every program code starts on its own page
+            story.append(Paragraph(
+                f"Practical Time Table{title_suffix} -- {year} / {session}", styles["Heading2"]))
+            story.append(Paragraph(f"Program Code: {pc}", styles["Heading3"]))
+            story.append(Spacer(1, 3 * mm))
+            chains = [_chain(r) for r in rows]
+            header = [P(label, header_style) for label, _ in COLUMNS]
+            table_data = [header]
+            style_cmds = [
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4472C4")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 1.5), ("RIGHTPADDING", (0, 0), (-1, -1), 1.5),
+                ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+            ]
+            for r in rows:
+                table_data.append([
+                    P(r["sr_no"]), P(r["date"]), P(r["day"]), P(r["time"]), P(year), P(session),
+                    P(r["compact_code"]), P(r["category"]), P(r["total_pre"]), P(r["batch_label"]),
+                    P(r["seat_range"]), P(r["batch_total"]), P(r["subject"], left_style), P(r["level1"]),
+                    P(r["level2"]), P(r["workshop"], left_style), P(r["faculty"], left_style),
+                    Paragraph(r.get("remark") or "&nbsp;", left_style),
+                ])
+                if r.get("remark"):
+                    style_cmds.append(("BACKGROUND", (0, len(table_data) - 1), (-1, len(table_data) - 1),
+                                        colors.HexColor("#FFF3E0")))
+            n = len(rows)
+            for col, depth in MERGE_COLS.items():
+                i = 0
+                while i < n:
+                    j = i + 1
+                    while j < n and chains[j][depth] == chains[i][depth] and (j - i) < max_run:
+                        j += 1
+                    if j - i > 1:
+                        style_cmds.append(("SPAN", (col, i + 1), (col, j)))  # +1: header row is table row 0
+                        for rr in range(i + 2, j + 1):
+                            table_data[rr][col] = ""
+                    i = j
+            tbl = Table(table_data, colWidths=col_widths, repeatRows=1)
+            tbl.setStyle(TableStyle(style_cmds))
+            story.append(tbl)
+
+            pc_unresolved = [u for u in (unresolved_rows or []) if _pc_of(u) == pc]
+            if pc_unresolved:
+                story.append(Spacer(1, 4 * mm))
+                story.append(Paragraph(
+                    f"Unresolved -- {len(pc_unresolved)} row(s) not fully scheduled", styles["Heading4"]))
+                for u in pc_unresolved:
+                    story.append(Paragraph(
+                        f"{u['compact_code']} / {u['subject']}-{u['level1']}-{u['level2']} "
+                        f"[{u['category']}] (seats {u['seat_range']}): {u['remark']}",
+                        styles["Normal"],
+                    ))
+        return story
+
+    last_error = None
+    for max_run in (60, 40, 25, 15, 8, 4, 1):
+        try:
+            make_doc().build(build_story(max_run))
+            return out_path
+        except (LayoutError, TypeError) as exc:  # a merged cell was taller than a page -- retry with shorter merges
+            last_error = exc
+    raise last_error
+
+
+def get_other_category_schedule(institute, year, session):
+    """{(program, semester, scheme, subject, level1, level2, category, batch_index):
+    {"assigned_date", "assigned_session_index"}}"""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT program_code, semester_label, scheme, subject, level1, level2, category, batch_index,
+                   assigned_date, assigned_session_index
+            FROM other_category_schedule
+        """).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return {
+        (r["program_code"], r["semester_label"], r["scheme"], r["subject"], r["level1"], r["level2"],
+         r["category"], r["batch_index"]): {
+            "assigned_date": r["assigned_date"], "assigned_session_index": r["assigned_session_index"],
+        }
+        for r in rows
+    }
+
+
+def save_other_category_assignment(institute, year, session, program_code, semester_label, scheme, subject,
+                                   level1, level2, category, batch_index, assigned_date, assigned_session_index):
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO other_category_schedule
+            (program_code, semester_label, scheme, subject, level1, level2, category, batch_index,
+             assigned_date, assigned_session_index)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(program_code, semester_label, scheme, subject, level1, level2, category, batch_index)
+        DO UPDATE SET assigned_date=excluded.assigned_date, assigned_session_index=excluded.assigned_session_index
+    """, (program_code, semester_label, scheme, subject, level1, level2, category, batch_index,
+          assigned_date, assigned_session_index))
+    conn.commit()
+    conn.close()
+
+
+def get_individual_fallback_assignments(institute, year, session):
+    """Every per-student FRESH slot given to a non-R student who could not
+    share any of their subject's R batch slots (see assign_pool_x()'s Part
+    1b) -- a subject-wide fallback, not tied to any batch_index, since it's
+    deliberately a DIFFERENT time from R's own batches. Returns
+    {(program, semester, scheme, subject, level1, level2):
+     {enrollment: (assigned_date, assigned_session_index)}}."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT * FROM individual_fallback_schedule").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    result = {}
+    for r in rows:
+        key = (r["program_code"], r["semester_label"], r["scheme"], r["subject"], r["level1"], r["level2"])
+        result.setdefault(key, {})[r["enrollment"]] = (r["assigned_date"], r["assigned_session_index"])
+    return result
+
+
+def save_individual_fallback_assignment(institute, year, session, program_code, semester_label, scheme, subject,
+                                        level1, level2, enrollment, assigned_date, assigned_session_index):
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO individual_fallback_schedule
+            (program_code, semester_label, scheme, subject, level1, level2, enrollment,
+             assigned_date, assigned_session_index)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(program_code, semester_label, scheme, subject, level1, level2, enrollment)
+        DO UPDATE SET assigned_date=excluded.assigned_date, assigned_session_index=excluded.assigned_session_index
+    """, (program_code, semester_label, scheme, subject, level1, level2, enrollment,
+          assigned_date, assigned_session_index))
+    conn.commit()
+    conn.close()
+
+
+def clear_individual_fallback_assignments(institute, year, session):
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM individual_fallback_schedule")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def clear_other_category_schedule(institute, year, session):
+    """Resets every non-R placement -- the merge-into-R assignments
+    (pool_x_assignments, for a subject that DOES have R batches), the
+    individual fresh-slot fallback (individual_fallback_schedule, for a
+    student who couldn't share any of that subject's R batch slots), and the
+    standalone assignments used when a subject has NO R batches at all to
+    merge into (other_category_schedule -- see
+    _assign_other_categories_standalone()). Never touches R's own
+    assignments."""
+    clear_all_pool_x_assignments(institute, year, session)
+    clear_individual_fallback_assignments(institute, year, session)
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM other_category_schedule")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def assign_other_categories(institute, year, session, matrix_rows, progress_cb=None):
+    """Places every non-R (and non-equivalent) category's students, subject
+    by subject: merged into their subject's already-assigned R (+equivalents)
+    batch (same date/time) wherever R has one, or -- for a subject with no R
+    batches at all (e.g. a lower semester the R cohort has already passed) --
+    scheduled into its own slot instead, so it never silently disappears. See
+    assign_pool_x() for the actual two-part logic; this is just its entry
+    point/button name, kept separate since it must run AFTER Assign Day &
+    Time (Pool R) has produced R's own assignments.
+
+    progress_cb, if given, is called as progress_cb(done, total) as each unit
+    of work (one student merge attempt, or one standalone batch attempt) is
+    processed -- purely for a caller-side progress indicator; never required.
+    """
+    return assign_pool_x(institute, year, session, matrix_rows, progress_cb=progress_cb)
+
+
+def get_merged_batch_categories(institute, year, session, program_code, semester_label, scheme,
+                                subject, level1, level2, batch_index, start_seat, end_seat):
+    """For ONE R (+equivalents) batch (identified by its seat-number range),
+    returns every category's students that belong under this SAME date/time --
+    the R group's members (by seat range), SPLIT BACK OUT by each member's
+    REAL typed category (e.g. plain 'R' and a separate row for an equivalent
+    like 'OTO') -- scheduling treats the whole group as one interchangeable
+    pool, but the report must always show the actual value the seating chart
+    has, never the internal 'R' bucket label -- plus every other (non-
+    equivalent) category whose students were merged into this batch_index via
+    assign_pool_x()/pool_x_assignments. This is what lets the report show an
+    OTO or X (or any other category) student alongside R under the one
+    date/time that batch was actually scheduled for, instead of a separate
+    row with its own slot, while still labeling each one correctly.
+
+    Returns {category: [{"enrollment", "seat_number"}, ...]} -- the true 'R'
+    value first (if present), then its equivalents alphabetically, then every
+    other merged category alphabetically. Empty categories are simply absent
+    from the dict.
+    """
+    pools = get_category_pools(institute, year, session, program_code, semester_label, scheme)
+    subject_enrollments = {
+        s["enrollment"] for s in
+        get_students_for_subject(institute, year, session, program_code, semester_label, scheme, subject, level1, level2)
+    }
+
+    result = {}
+    r_members = [
+        p for p in pools.get(BATCH_BASE_CATEGORY, [])
+        if p["enrollment"] in subject_enrollments and start_seat <= int(p["seat_number"]) <= end_seat
+    ]
+    for p in r_members:
+        real_category = p.get("status") or BATCH_BASE_CATEGORY
+        result.setdefault(real_category, []).append({"enrollment": p["enrollment"], "seat_number": p["seat_number"]})
+    if result:
+        ordered_r_categories = sorted(result.keys(), key=lambda c: (c != BATCH_BASE_CATEGORY, c.lower(), c))
+        result = {c: result[c] for c in ordered_r_categories}
+
+    assignments_for_subject = get_pool_x_assignments(institute, year, session).get(
+        (program_code, semester_label, scheme, subject, level1, level2), {}
+    )
+    for category in sorted((c for c in pools if c != BATCH_BASE_CATEGORY), key=lambda c: (c.lower(), c)):
+        matched = [
+            p for p in pools[category]
+            if p["enrollment"] in subject_enrollments and assignments_for_subject.get(p["enrollment"]) == batch_index
+        ]
+        if matched:
+            result[category] = [{"enrollment": p["enrollment"], "seat_number": p["seat_number"]} for p in matched]
+
+    return result
+
+
+def assign_day_time_pool_r(institute, year, session, matrix_rows, progress_cb=None):
+    """Runs the Day & Time assignment algorithm for the R group (R plus its
+    equivalents) only, across every subject-batch in matrix_rows that already has
+    BOTH Workshop and Faculty saved (mandatory prerequisite -- rows missing either
+    are skipped and reported as unassigned).
+
+    Placement ORDER (highest priority first), across every program code together:
+      1. Semester priority (get_semester_priority()) -- lower number = higher priority.
+      2. Subject priority WITHIN that semester+program code (get_subject_priority()) --
+         lower number = higher priority; a subject with no saved priority is placed
+         after every prioritized subject, ties broken by total student count (larger
+         first) then subject code.
+      3. The subject's own batches, in Batch 1, Batch 2, ... order.
+
+    For each batch in that order: starting from the slot right after the SAME
+    subject's previous batch (or the first slot for its first batch), find the
+    earliest slot where (a) the batch's faculty is marked AVAILABLE
+    (get_faculty_availability() -- a faculty with no ticks at all is available
+    NOWHERE), (b) neither the workshop nor the faculty is already used in that
+    slot by another subject, AND (c) none of this batch's own enrollment numbers
+    are already sitting in that exact slot from an EARLIER R placement made
+    during this same run -- a batch's seat-number range is the same group of
+    students across every subject, so without this check two different subjects'
+    batches (sharing the same students) could otherwise land in the identical
+    slot. Different subjects CAN share a slot if their workshop, faculty, AND
+    students are all free; two batches of the SAME subject never share a slot.
+
+    progress_cb, if given, is called as progress_cb(done, total) once per
+    subject-batch attempted (placed or not) -- purely for a caller-side
+    progress indicator; never required for correctness.
+
+    Returns {"assigned_count": int, "unassigned": [{...row info..., "reason": str}, ...]}.
+    Assignments are persisted directly into schedule_row_config.
+    """
+    slot_queue = get_day_slot_queue(institute, year, session)
+    if not slot_queue:
+        return {"assigned_count": 0, "unassigned": [], "error": "No exam days/sessions configured yet."}
+
+    row_configs = get_schedule_row_configs(institute, year, session)
+    availability = get_faculty_availability(institute, year, session)
+    allowed_by_sem = get_semester_slot_sets(institute, year, session)  # each semester's own date range
+    semesters_present = sorted({row["semester_label"] for row in matrix_rows})
+    sem_priority = get_semester_priority(institute, year, session, semesters_present)
+    subj_priority = get_subject_priority(institute, year, session)
+
+    subject_totals = {}
+    grouped = {}
+    order_of_subjects = []
+
+    for row in matrix_rows:
+        seat_ranges = get_seat_number_batches(institute, year, session, row["program_code"], row["semester_label"], row["scheme"])
+        if not seat_ranges:
+            continue
+        students = get_students_for_subject(
+            institute, year, session, row["program_code"], row["semester_label"],
+            row["scheme"], row["subject"], row["level1"], row["level2"],
+        )
+        subj_key = (row["program_code"], row["semester_label"], row["scheme"], row["subject"], row["level1"], row["level2"])
+        subject_totals[subj_key] = subject_totals.get(subj_key, 0) + len(students)
+        for bi in range(len(seat_ranges)):
+            cfg = row_configs.get(subj_key + (BATCH_BASE_CATEGORY, bi), {})
+            workshop = cfg.get("workshop_name", "")
+            faculty = cfg.get("faculty_name", "")
+            if not workshop or not faculty:
+                continue
+            members = get_category_batch_members(
+                institute, year, session, row["program_code"], row["semester_label"], row["scheme"],
+                row["subject"], row["level1"], row["level2"], BATCH_BASE_CATEGORY, bi,
+            )
+            if subj_key not in grouped:
+                grouped[subj_key] = []
+                order_of_subjects.append(subj_key)
+            grouped[subj_key].append({
+                "subject_key": subj_key, "batch_index": bi, "workshop": workshop, "faculty": faculty,
+                "members": members,
+            })
+
+    def sort_key(subj_key):
+        pc, sem, scheme, subj, l1, l2 = subj_key
+        sem_p = sem_priority.get(sem, 999)
+        subj_p = subj_priority.get((pc, sem, subj), 999)
+        return (sem_p, subj_p, -subject_totals.get(subj_key, 0), subj)
+
+    order_of_subjects.sort(key=sort_key)
+
+    occupied_workshop = {}
+    occupied_faculty = {}
+    enrollment_used_slots = {}  # enrollment -> set of (date, session_index) already claimed by an EARLIER R placement this run
+    batch_dates_used = {}       # (program, semester, scheme, batch_index) -> dates already holding an exam for that R batch
+    assigned = []
+    unassigned = []
+    total_units = sum(len(v) for v in grouped.values())
+    done_units = 0
+
+    for subj_key in order_of_subjects:
+        cursor = 0
+        for sb in grouped[subj_key]:
+            placed = False
+            saw_available_slot = False
+            saw_clear_of_ws_fac_clash = False
+            saw_batch_date_free = False
+            saw_allowed_slot = False
+            sem_allowed = allowed_by_sem.get(subj_key[1], set())
+            batch_id = (subj_key[0], subj_key[1], subj_key[2], sb["batch_index"])
+            idx = cursor
+            while idx < len(slot_queue):
+                slot = slot_queue[idx]
+                slot_key = (slot["date"], slot["session_index"])
+                if slot_key not in sem_allowed:
+                    idx += 1
+                    continue  # outside this semester's own date range / sessions
+                saw_allowed_slot = True
+                if availability.get((sb["faculty"], slot["date"], slot["session_index"])):
+                    saw_available_slot = True
+                    ws_set = occupied_workshop.setdefault(idx, set())
+                    fac_set = occupied_faculty.setdefault(idx, set())
+                    if sb["workshop"] not in ws_set and sb["faculty"] not in fac_set:
+                        saw_clear_of_ws_fac_clash = True
+                        # One exam per DATE for an R batch: a batch that already has an exam on this
+                        # date (in any session) may not be given a second one the same day.
+                        batch_date_free = slot["date"] not in batch_dates_used.get(batch_id, set())
+                        if batch_date_free:
+                            saw_batch_date_free = True
+                        student_clash = any(
+                            slot_key in enrollment_used_slots.get(m["enrollment"], set())
+                            for m in sb["members"]
+                        )
+                        if batch_date_free and not student_clash:
+                            ws_set.add(sb["workshop"])
+                            fac_set.add(sb["faculty"])
+                            for m in sb["members"]:
+                                enrollment_used_slots.setdefault(m["enrollment"], set()).add(slot_key)
+                            batch_dates_used.setdefault(batch_id, set()).add(slot["date"])
+                            assigned.append({**sb, "slot": slot})
+                            cursor = idx + 1
+                            placed = True
+                            break
+                idx += 1
+            if not placed:
+                if not saw_allowed_slot:
+                    reason = "this semester has no exam slot left in its date range"
+                elif not saw_available_slot:
+                    reason = f"faculty '{sb['faculty']}' is not marked available in any exam slot"
+                elif not saw_clear_of_ws_fac_clash:
+                    reason = (
+                        f"every slot where '{sb['faculty']}' is available already has a "
+                        f"workshop/faculty clash"
+                    )
+                elif not saw_batch_date_free:
+                    reason = "this R batch already has an exam on every remaining date (only one exam per day)"
+                else:
+                    reason = "every remaining slot clashes with a student already scheduled in this batch"
+                unassigned.append({**sb, "reason": reason})
+            done_units += 1
+            if progress_cb:
+                progress_cb(done_units, total_units)
+
+    for a in assigned:
+        pc, sem, scheme, subj, l1, l2 = a["subject_key"]
+        save_assigned_day_time(
+            institute, year, session, pc, sem, scheme, subj, l1, l2, a["batch_index"],
+            a["slot"]["date"], a["slot"]["session_index"],
+        )
+
+    return {"assigned_count": len(assigned), "unassigned": unassigned}
+
+
+def save_assigned_day_time(institute, year, session, program_code, semester_label, scheme, subject, level1, level2,
+                            batch_index, assigned_date, assigned_session_index):
+    """Records the Day/Session assigned to one subject-batch row --
+    updates the existing schedule_row_config row (Workshop/Faculty must
+    already exist there, since assignment requires both to be filled)."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        UPDATE schedule_row_config SET assigned_date=?, assigned_session_index=?
+        WHERE program_code=? AND semester_label=? AND scheme=? AND subject=? AND level1=? AND level2=?
+        AND category=? AND batch_index=?
+    """, (assigned_date, assigned_session_index, program_code, semester_label, scheme, subject, level1, level2,
+          BATCH_BASE_CATEGORY, batch_index))
+    conn.commit()
+    conn.close()
+
+
+def clear_all_day_time_assignments(institute, year, session):
+    """Resets every row's assigned Day/Session back to unassigned --
+    used before re-running Assign Day & Time so stale assignments from
+    a previous run don't linger for rows no longer being (re)assigned."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE schedule_row_config SET assigned_date='', assigned_session_index=-1 WHERE category=?",
+            (BATCH_BASE_CATEGORY,),
+        )
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def save_pool_x_assignment(institute, year, session, program_code, semester_label, scheme, subject, level1, level2,
+                            enrollment, assigned_batch_index):
+    """Records which of a subject's already Day/Time-assigned batches
+    ONE EX (Pool X) student is placed into. Pool X students don't
+    affect batch SIZING or seat-range computation (that's Pool R only)
+    -- this is purely "which existing batch does this X student join",
+    chosen to avoid a schedule clash with that same student's own
+    Regular appearance elsewhere.
+    """
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO pool_x_assignments
+            (program_code, semester_label, scheme, subject, level1, level2, enrollment, assigned_batch_index)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(program_code, semester_label, scheme, subject, level1, level2, enrollment)
+        DO UPDATE SET assigned_batch_index=excluded.assigned_batch_index
+    """, (program_code, semester_label, scheme, subject, level1, level2, enrollment, assigned_batch_index))
+    conn.commit()
+    conn.close()
+
+
+def get_pool_x_assignments(institute, year, session):
+    """All saved Pool X batch assignments for this institute+year+
+    session. Returns {(program_code, semester_label, scheme, subject,
+    level1, level2): {enrollment: assigned_batch_index}}.
+    """
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("""
+            SELECT program_code, semester_label, scheme, subject, level1, level2, enrollment, assigned_batch_index
+            FROM pool_x_assignments
+        """).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    result = {}
+    for r in rows:
+        key = (r["program_code"], r["semester_label"], r["scheme"], r["subject"], r["level1"], r["level2"])
+        result.setdefault(key, {})[r["enrollment"]] = r["assigned_batch_index"]
+    return result
+
+
+def clear_all_pool_x_assignments(institute, year, session):
+    """Removes every saved Pool X batch assignment -- used before
+    re-running Assign Pool X so a previous run's placements don't
+    linger for students no longer being (re)assigned."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM pool_x_assignments")
+    except sqlite3.OperationalError:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def subject_has_r_students(institute, year, session, program_code, semester_label, scheme,
+                           subject, level1, level2):
+    """True if at least one R-bucket (R or equivalent) student takes this subject --
+    i.e. the subject 'belongs to R'. Otherwise its other-category students are
+    scheduled standalone."""
+    pools = get_category_pools(institute, year, session, program_code, semester_label, scheme)
+    enrolled = {s["enrollment"] for s in get_students_for_subject(
+        institute, year, session, program_code, semester_label, scheme, subject, level1, level2)}
+    return any(p["enrollment"] in enrolled for p in pools.get(BATCH_BASE_CATEGORY, []))
+
+
+def get_other_category_subject_batches(institute, year, session, program_code, semester_label, scheme,
+                                       subject, level1, level2, category):
+    """Batches of ONE non-R category for ONE subject, used only when that subject
+    is scheduled standalone (no R student takes it). Follows the category's own
+    Batch Setup ranges when configured (non-empty batches only); if none were set
+    up, ALL of that category's students for the subject form a single batch 0 so
+    they are never silently dropped. Returns [(batch_index, [{"enrollment",
+    "seat_number"}, ...]), ...]."""
+    ranges = get_seat_number_batches(institute, year, session, program_code, semester_label, scheme, category=category)
+    if ranges:
+        out = []
+        for bi in range(len(ranges)):
+            members = get_category_batch_members(
+                institute, year, session, program_code, semester_label, scheme,
+                subject, level1, level2, category, bi,
+            )
+            if members:
+                out.append((bi, members))
+        return out
+    pools = get_category_pools(institute, year, session, program_code, semester_label, scheme)
+    enrolled = {s["enrollment"] for s in get_students_for_subject(
+        institute, year, session, program_code, semester_label, scheme, subject, level1, level2)}
+    members = [
+        {"enrollment": p["enrollment"], "seat_number": p["seat_number"]}
+        for p in pools.get(category, []) if p["enrollment"] in enrolled
+    ]
+    return [(0, members)] if members else []
+
+
+def _preload_r_student_slots(institute, year, session, row_configs):
+    """{enrollment: {(date, session_index), ...}} for every R batch that already has
+    a Day/Time, across ALL subjects/semesters (not just the current filter)."""
+    used = {}
+    for rid, cfg in row_configs.items():
+        pc, sem, scheme, subj, l1, l2, category, bi = rid
+        if category != BATCH_BASE_CATEGORY:
+            continue
+        if not cfg.get("assigned_date") or cfg.get("assigned_session_index", -1) < 0:
+            continue
+        slot_key = (cfg["assigned_date"], cfg["assigned_session_index"])
+        for m in get_category_batch_members(institute, year, session, pc, sem, scheme, subj, l1, l2, BATCH_BASE_CATEGORY, bi):
+            used.setdefault(m["enrollment"], set()).add(slot_key)
+    return used
+
+
+def r_assignments_exist(institute, year, session):
+    """True if any R (+equivalents) batch currently has a Day/Time assigned."""
+    return any(
+        rid[6] == BATCH_BASE_CATEGORY and cfg.get("assigned_date") and cfg.get("assigned_session_index", -1) >= 0
+        for rid, cfg in get_schedule_row_configs(institute, year, session).items()
+    )
+
+
+def other_category_assignments_exist(institute, year, session):
+    """True if any non-R student has been merged into an R batch, given its own
+    fresh fallback slot, or scheduled standalone."""
+    return (bool(get_pool_x_assignments(institute, year, session))
+            or bool(get_individual_fallback_assignments(institute, year, session))
+            or bool(get_other_category_schedule(institute, year, session)))
+
+
+def clear_all_scheduling_assignments(institute, year, session):
+    """Unified Delete: clears R's Day/Time AND every Other-Categories placement
+    (merged + standalone) together -- Other Categories depends entirely on R's
+    slots, so R is never cleared alone."""
+    clear_all_day_time_assignments(institute, year, session)
+    clear_other_category_schedule(institute, year, session)
+
+
+def _build_workshop_faculty_occupancy(institute, year, session, row_configs, slot_index_by_key):
+    """{slot_index: {workshop_name, ...}} and the same for faculty -- every
+    workshop/faculty already committed to a slot ANYWHERE in this Year+
+    Session, from R's own assigned batches, any already-saved standalone
+    placement, and any already-saved individual fallback slot. Used by the
+    individual fresh-slot fallback (see assign_pool_x()) so it never double-
+    books a workshop or faculty onto a slot something else already uses.
+    """
+    occupied_workshop, occupied_faculty = {}, {}
+
+    def mark(date, sidx, workshop, faculty):
+        idx = slot_index_by_key.get((date, sidx))
+        if idx is None:
+            return
+        if workshop:
+            occupied_workshop.setdefault(idx, set()).add(workshop)
+        if faculty:
+            occupied_faculty.setdefault(idx, set()).add(faculty)
+
+    for rid, cfg in row_configs.items():
+        if rid[6] == BATCH_BASE_CATEGORY and cfg.get("assigned_date") and cfg.get("assigned_session_index", -1) >= 0:
+            mark(cfg["assigned_date"], cfg["assigned_session_index"], cfg.get("workshop_name"), cfg.get("faculty_name"))
+
+    for rid, sched in get_other_category_schedule(institute, year, session).items():
+        if sched.get("assigned_date") and sched.get("assigned_session_index", -1) >= 0:
+            cfg = row_configs.get(rid, {})
+            mark(sched["assigned_date"], sched["assigned_session_index"], cfg.get("workshop_name"), cfg.get("faculty_name"))
+
+    for key, by_enr in get_individual_fallback_assignments(institute, year, session).items():
+        workshop, faculty = get_subject_workshop_faculty(row_configs, key[3])
+        for _enr, (date, sidx) in by_enr.items():
+            mark(date, sidx, workshop, faculty)
+
+    return occupied_workshop, occupied_faculty
+
+
+def assign_pool_x(institute, year, session, matrix_rows, progress_cb=None):
+    """Places every non-R (Pool X / OTO / any other category) student into
+    Day/Time slots, subject by subject, in two parts:
+
+      1. MERGE -- if the subject already has R (+equivalents) batches with
+         an assigned date/time (Assign Day & Time (Pool R) has run for it),
+         every non-R student of that subject is placed into whichever of
+         those existing R batches doesn't clash with an exam that student
+         already has elsewhere. Never given a separate slot of their own.
+      1b. INDIVIDUAL FALLBACK -- if a student can't be merged into any of
+         that subject's R batches (every one clashes with an exam they
+         already have), they are NOT simply given up on: a brand-new slot
+         just for THEM is searched for, using that subject's own saved
+         workshop/faculty (same "same subject code = same workshop/faculty"
+         rule as everywhere else), checked against faculty availability,
+         against every workshop/faculty already committed anywhere else at
+         that slot, and against every slot this student already occupies.
+         This is deliberately a DIFFERENT time from R's own batch for that
+         subject -- it only runs once merging has been tried and failed.
+         Only if no slot anywhere satisfies all of that does the student
+         end up genuinely unassigned.
+      2. STANDALONE FALLBACK -- if the subject has NO R batches at all for
+         this Year+Session (e.g. a lower semester the R cohort has already
+         passed, so only backlog/EX students remain in it -- exactly the
+         "R in TX2K, also X in TX1K where TX1K has no R left" case), there
+         is nothing to merge into. That subject's own categories are
+         instead scheduled into their OWN slot using the same subject-
+         priority/faculty-availability/workshop-clash rules the R algorithm
+         itself uses (see _assign_other_categories_standalone()) -- this is
+         what keeps that TX1K appearance from silently vanishing.
+
+    progress_cb, if given, is called as progress_cb(done, total) once per unit
+    of work (one student merge-or-fallback attempt in part 1, one standalone
+    batch attempt in part 2) -- purely for a caller-side progress indicator.
+
+    Returns {"assigned_count": int, "unassigned": [...]} -- part 1's
+    unassigned entries are per-student ({"enrollment", "program_code",
+    "semester_label", "scheme", "subject", "reason"}); part 2's are per
+    subject-batch ({"subject_key", "category", "batch_index", "reason"}).
+    """
+    row_configs = get_schedule_row_configs(institute, year, session)
+
+    # Every (date, session) each enrollment already sits as R ANYWHERE in this
+    # Year+Session (any subject, any semester) -- a merged/standalone placement
+    # may never land on one of those slots (same date, different session is fine).
+    enrollment_used_slots = _preload_r_student_slots(institute, year, session, row_configs)
+    subject_batch_info = {}  # subj_key -> [(batch_index, start, end, assigned_date, assigned_session_index), ...]
+    subject_pools = {}       # subj_key -> (pool_r_in_subject, pool_x_in_subject)
+    subjects_without_r = []  # subj_key list -- no R-bucket student takes this subject
+
+    for row in matrix_rows:
+        subj_key = (row["program_code"], row["semester_label"], row["scheme"], row["subject"], row["level1"], row["level2"])
+        if subj_key in subject_pools:
+            continue  # a subject can repeat across matrix_rows (once per semester it's found in) -- de-dup
+        seat_ranges = get_seat_number_batches(institute, year, session, row["program_code"], row["semester_label"], row["scheme"])
+        pool_r, pool_x = get_seat_number_pools(institute, year, session, row["program_code"], row["semester_label"], row["scheme"])
+        subject_students = get_students_for_subject(
+            institute, year, session, row["program_code"], row["semester_label"],
+            row["scheme"], row["subject"], row["level1"], row["level2"],
+        )
+        subject_enrollments = {s["enrollment"] for s in subject_students}
+        pool_r_in_subject = [p for p in pool_r if p["enrollment"] in subject_enrollments]
+        pool_x_in_subject = [p for p in pool_x if p["enrollment"] in subject_enrollments]
+        subject_pools[subj_key] = (pool_r_in_subject, pool_x_in_subject)
+
+        if not pool_r_in_subject:
+            # No R-bucket (R or equivalent) student takes this subject at all, so
+            # it does not "belong to R" -- nothing to merge into. Its other-category
+            # students get their own separate slot (standalone part below).
+            subject_batch_info[subj_key] = []
+            if pool_x_in_subject:
+                subjects_without_r.append(subj_key)
+            continue
+        if not seat_ranges:
+            subject_batch_info[subj_key] = []  # R students exist but no R batches set up yet
+            continue
+
+        batch_info = []
+        for bi, (start, end) in enumerate(seat_ranges):
+            cfg = row_configs.get(subj_key + (BATCH_BASE_CATEGORY, bi), {})
+            adate = cfg.get("assigned_date", "")
+            asidx = cfg.get("assigned_session_index", -1)
+            batch_info.append((bi, start, end, adate, asidx))
+            if adate and asidx is not None and asidx >= 0:
+                for p in pool_r_in_subject:
+                    seat_n = int(p["seat_number"]) if str(p["seat_number"]).lstrip("-").isdigit() else None
+                    if seat_n is not None and start <= seat_n <= end:
+                        enrollment_used_slots.setdefault(p["enrollment"], set()).add((adate, asidx))
+        subject_batch_info[subj_key] = batch_info
+
+    # Setup for the individual fresh-slot fallback (Part 1b) -- only needed
+    # lazily, built once here rather than per-student.
+    fallback_slot_queue = get_day_slot_queue(institute, year, session)
+    fallback_slot_index_by_key = {(s["date"], s["session_index"]): i for i, s in enumerate(fallback_slot_queue)}
+    fallback_availability = get_faculty_availability(institute, year, session)
+    fallback_allowed = get_semester_slot_sets(institute, year, session)
+    fallback_occupied_workshop, fallback_occupied_faculty = _build_workshop_faculty_occupancy(
+        institute, year, session, row_configs, fallback_slot_index_by_key,
+    )
+
+    def try_individual_fallback(subj_key, enrollment):
+        """One student, one subject that DOES have R but couldn't be merged
+        into any of its batches -- searches every exam slot for one where
+        the subject's own workshop/faculty is free and this student has no
+        clash, and saves it via save_individual_fallback_assignment() if
+        found. Returns (slot_dict_or_None, failure_reason_or_None)."""
+        workshop, faculty = get_subject_workshop_faculty(row_configs, subj_key[3])
+        if not (workshop and faculty):
+            return None, "no workshop/faculty saved for this subject"
+        used = enrollment_used_slots.get(enrollment, set())
+        for idx, slot in enumerate(fallback_slot_queue):
+            slot_key = (slot["date"], slot["session_index"])
+            if slot_key in used:
+                continue
+            if slot_key not in fallback_allowed.get(subj_key[1], ()):
+                continue  # outside this semester's own date range / sessions
+            if not fallback_availability.get((faculty, slot["date"], slot["session_index"])):
+                continue
+            ws_set = fallback_occupied_workshop.setdefault(idx, set())
+            fac_set = fallback_occupied_faculty.setdefault(idx, set())
+            if workshop in ws_set or faculty in fac_set:
+                continue
+            ws_set.add(workshop)
+            fac_set.add(faculty)
+            enrollment_used_slots.setdefault(enrollment, set()).add(slot_key)
+            pc, sem, scheme, subj, l1, l2 = subj_key
+            save_individual_fallback_assignment(
+                institute, year, session, pc, sem, scheme, subj, l1, l2, enrollment,
+                slot["date"], slot["session_index"],
+            )
+            return slot, None
+        return None, (
+            "every exam slot either clashes with an exam this enrollment already has, or has no "
+            f"free workshop/faculty for '{workshop}' / '{faculty}'"
+        )
+
+    # Part 1 (+ 1b): merge into existing R batches wherever R has any; a
+    # student who can't be merged gets their own fresh slot tried instead of
+    # being given up on immediately.
+    assigned_count = 0
+    unassigned = []
+    without_r_set = set(subjects_without_r)
+    part1_total = sum(
+        len(subject_pools[k][1]) for k in subject_batch_info if k not in without_r_set and subject_pools[k][1]
+    )
+    done_units = 0
+    for subj_key, batch_info in subject_batch_info.items():
+        if subj_key in without_r_set:
+            continue  # handled by the standalone fallback below instead
+        _pool_r_in_subject, pool_x_in_subject = subject_pools[subj_key]
+        if not pool_x_in_subject:
+            continue
+        assigned_batches = [b for b in batch_info if b[3] and b[4] is not None and b[4] >= 0]
+        if not assigned_batches:
+            for p in pool_x_in_subject:
+                slot, err = try_individual_fallback(subj_key, p["enrollment"])
+                if slot:
+                    assigned_count += 1
+                else:
+                    unassigned.append({
+                        "enrollment": p["enrollment"], "program_code": subj_key[0], "semester_label": subj_key[1],
+                        "scheme": subj_key[2], "subject": subj_key[3],
+                        "reason": "this subject's R batches have no date/time yet, and a fresh slot of its "
+                                  f"own couldn't be found either -- {err}.",
+                    })
+                done_units += 1
+                if progress_cb:
+                    progress_cb(done_units, part1_total)
+            continue
+
+        for p in pool_x_in_subject:
+            used = enrollment_used_slots.get(p["enrollment"], set())
+            placed = False
+            for (bi, _start, _end, adate, asidx) in assigned_batches:
+                if (adate, asidx) not in used:
+                    save_pool_x_assignment(
+                        institute, year, session, subj_key[0], subj_key[1], subj_key[2],
+                        subj_key[3], subj_key[4], subj_key[5], p["enrollment"], bi,
+                    )
+                    enrollment_used_slots.setdefault(p["enrollment"], set()).add((adate, asidx))
+                    assigned_count += 1
+                    placed = True
+                    break
+            if not placed:
+                slot, err = try_individual_fallback(subj_key, p["enrollment"])
+                if slot:
+                    assigned_count += 1
+                else:
+                    unassigned.append({
+                        "enrollment": p["enrollment"], "program_code": subj_key[0], "semester_label": subj_key[1],
+                        "scheme": subj_key[2], "subject": subj_key[3],
+                        "reason": "every R batch for this subject clashes with an exam this enrollment "
+                                  f"already has elsewhere, and a fresh slot of its own couldn't be found "
+                                  f"either -- {err}.",
+                    })
+            done_units += 1
+            if progress_cb:
+                progress_cb(done_units, part1_total)
+
+    # Part 2: standalone scheduling for subjects with no R batches at all.
+    if subjects_without_r:
+        standalone_rows = [
+            row for row in matrix_rows
+            if (row["program_code"], row["semester_label"], row["scheme"], row["subject"], row["level1"], row["level2"])
+            in without_r_set
+        ]
+        def standalone_progress(d, t):
+            if progress_cb:
+                progress_cb(part1_total + d, part1_total + t)
+
+        standalone = _assign_other_categories_standalone(
+            institute, year, session, standalone_rows, row_configs, enrollment_used_slots,
+            progress_cb=standalone_progress if progress_cb else None,
+        )
+        assigned_count += standalone["assigned_count"]
+        unassigned.extend(standalone["unassigned"])
+    elif progress_cb and part1_total == 0:
+        progress_cb(1, 1)
+
+    return {"assigned_count": assigned_count, "unassigned": unassigned}
+
+
+def _assign_other_categories_standalone(institute, year, session, matrix_rows, row_configs, seed_enrollment_slots=None, progress_cb=None):
+    """Independent Day/Time scheduling for a subject's non-R categories,
+    used ONLY when that subject has no R (+equivalents) batches at all to
+    merge into (see assign_pool_x()'s Part 2) -- e.g. a lower semester whose
+    R cohort has already passed it, leaving only backlog/EX students. Each
+    (category, batch) gets its own slot, using the subject's own saved
+    workshop/faculty, never clashing with another subject's use of that same
+    workshop/faculty (R's own already-assigned slots included) or with a
+    student's own existing exam elsewhere. Placement order: semester
+    priority, then subject priority within that semester+program code, then
+    category (alphabetical) and that category's batches in order -- same
+    rules R's own algorithm uses. Results are saved via
+    save_other_category_assignment().
+    """
+    slot_queue = get_day_slot_queue(institute, year, session)
+    if not slot_queue:
+        if progress_cb:
+            progress_cb(1, 1)
+        return {"assigned_count": 0, "unassigned": []}
+    slot_index_by_key = {(s["date"], s["session_index"]): i for i, s in enumerate(slot_queue)}
+
+    availability = get_faculty_availability(institute, year, session)
+    allowed_by_sem = get_semester_slot_sets(institute, year, session)
+    semesters_present = sorted({row["semester_label"] for row in matrix_rows})
+    sem_priority = get_semester_priority(institute, year, session, semesters_present)
+    subj_priority = get_subject_priority(institute, year, session)
+
+    occupied_workshop, occupied_faculty = {}, {}
+    # Start from every slot each enrollment already occupies (R anywhere, plus
+    # anything merged earlier in this same run), so a standalone exam can share a
+    # DATE with an existing exam but never the same date+session.
+    enrollment_used_slots = {e: set(v) for e, v in (seed_enrollment_slots or {}).items()}
+
+    # Preload occupancy + student clashes from R's own already-saved
+    # assignments ANYWHERE in the database -- these standalone subjects have
+    # none of their own, but must still avoid clashing with other subjects'
+    # (R's included) use of the same workshop/faculty or the same student.
+    for rid, cfg in row_configs.items():
+        if not cfg.get("assigned_date") or cfg.get("assigned_session_index", -1) < 0:
+            continue
+        pc, sem, scheme, subj, l1, l2, category, bi = rid
+        if category != BATCH_BASE_CATEGORY:
+            continue
+        slot_key = (cfg["assigned_date"], cfg["assigned_session_index"])
+        idx = slot_index_by_key.get(slot_key)
+        if idx is not None:
+            if cfg.get("workshop_name"):
+                occupied_workshop.setdefault(idx, set()).add(cfg["workshop_name"])
+            if cfg.get("faculty_name"):
+                occupied_faculty.setdefault(idx, set()).add(cfg["faculty_name"])
+        members = get_category_batch_members(institute, year, session, pc, sem, scheme, subj, l1, l2, BATCH_BASE_CATEGORY, bi)
+        for m in members:
+            enrollment_used_slots.setdefault(m["enrollment"], set()).add(slot_key)
+
+    subject_totals = {}
+    grouped = {}
+    order_of_subjects = []
+
+    for row in matrix_rows:
+        subj_key = (row["program_code"], row["semester_label"], row["scheme"], row["subject"], row["level1"], row["level2"])
+        pools = get_category_pools(institute, year, session, row["program_code"], row["semester_label"], row["scheme"])
+        other_categories = sorted((c for c in pools if c != BATCH_BASE_CATEGORY), key=lambda c: (c.lower(), c))
+        for category in other_categories:
+            for bi, members in get_other_category_subject_batches(
+                institute, year, session, row["program_code"], row["semester_label"], row["scheme"],
+                row["subject"], row["level1"], row["level2"], category,
+            ):
+                own_cfg = row_configs.get(subj_key + (category, bi), {})
+                workshop, faculty = own_cfg.get("workshop_name", ""), own_cfg.get("faculty_name", "")
+                if not (workshop and faculty):
+                    workshop, faculty = get_subject_workshop_faculty(row_configs, row["subject"])
+                subject_totals[subj_key] = subject_totals.get(subj_key, 0) + len(members)
+                if subj_key not in grouped:
+                    grouped[subj_key] = []
+                    order_of_subjects.append(subj_key)
+                grouped[subj_key].append({
+                    "category": category, "batch_index": bi, "workshop": workshop, "faculty": faculty,
+                    "members": members,
+                })
+
+    def sort_key(subj_key):
+        pc, sem, scheme, subj, l1, l2 = subj_key
+        return (sem_priority.get(sem, 999), subj_priority.get((pc, sem, subj), 999), -subject_totals.get(subj_key, 0), subj)
+
+    order_of_subjects.sort(key=sort_key)
+
+    assigned, unassigned = [], []
+    total_units = sum(len(v) for v in grouped.values())
+    done_units = 0
+    for subj_key in order_of_subjects:
+        cursor = 0
+        for sb in sorted(grouped[subj_key], key=lambda x: (x["category"], x["batch_index"])):
+            if not sb["workshop"] or not sb["faculty"]:
+                unassigned.append({**sb, "subject_key": subj_key,
+                                   "reason": "no workshop/faculty saved for this subject/category/batch yet"})
+                done_units += 1
+                if progress_cb:
+                    progress_cb(done_units, total_units)
+                continue
+            placed = False
+            saw_available, saw_clear_of_clash = False, False
+            saw_allowed = False
+            sem_allowed = allowed_by_sem.get(subj_key[1], set())
+            idx = cursor
+            while idx < len(slot_queue):
+                slot = slot_queue[idx]
+                slot_key = (slot["date"], slot["session_index"])
+                if slot_key not in sem_allowed:
+                    idx += 1
+                    continue  # outside this semester's own date range / sessions
+                saw_allowed = True
+                if availability.get((sb["faculty"], slot["date"], slot["session_index"])):
+                    saw_available = True
+                    ws_set = occupied_workshop.setdefault(idx, set())
+                    fac_set = occupied_faculty.setdefault(idx, set())
+                    if sb["workshop"] not in ws_set and sb["faculty"] not in fac_set:
+                        saw_clear_of_clash = True
+                        student_clash = any(slot_key in enrollment_used_slots.get(m["enrollment"], set())
+                                            for m in sb["members"])
+                        if not student_clash:
+                            ws_set.add(sb["workshop"])
+                            fac_set.add(sb["faculty"])
+                            for m in sb["members"]:
+                                enrollment_used_slots.setdefault(m["enrollment"], set()).add(slot_key)
+                            assigned.append({**sb, "subject_key": subj_key, "slot": slot})
+                            cursor = idx + 1
+                            placed = True
+                            break
+                idx += 1
+            if not placed:
+                if not saw_allowed:
+                    reason = "this semester has no exam slot in its date range"
+                elif not saw_available:
+                    reason = f"faculty '{sb['faculty']}' is not marked available in any exam slot"
+                elif not saw_clear_of_clash:
+                    reason = "every available slot already has a workshop/faculty clash"
+                else:
+                    reason = "every remaining free slot clashes with a student's own existing exam"
+                unassigned.append({**sb, "subject_key": subj_key, "reason": reason})
+            done_units += 1
+            if progress_cb:
+                progress_cb(done_units, total_units)
+
+    for a in assigned:
+        pc, sem, scheme, subj, l1, l2 = a["subject_key"]
+        save_other_category_assignment(
+            institute, year, session, pc, sem, scheme, subj, l1, l2, a["category"], a["batch_index"],
+            a["slot"]["date"], a["slot"]["session_index"],
+        )
+
+    return {"assigned_count": len(assigned), "unassigned": unassigned}
+
+
+# ==========================================================
+# MANUAL DATE / TIME SLOT ALLOCATION (separate from the automatic assignment)
+# ==========================================================
+
+# Tables whose contents decide what a generated time table looks like. Hashed (see
+# compute_timetable_signature) so the app can tell when the saved table is out of date.
+_TIMETABLE_SIGNATURE_TABLES = [
+    "institute_seating_chart", "institute_seating_chart_subjects", "parent_child_subjects",
+    "category_equivalence", "date_range_groups", "date_range_group_semesters", "group_dates",
+    "group_date_sessions", "seat_number_batches",
+    "schedule_row_config", "other_category_schedule", "individual_fallback_schedule",
+    "pool_x_assignments", "semester_priority", "subject_priority", "faculty_availability",
+]
+
+
+def compute_timetable_signature(institute, year, session, mode):
+    """A fingerprint of the data behind the Practical Time Table. Compared with the fingerprint stored when
+    the table was generated, it tells whether anything relevant changed since. For 'manual' the automatic
+    assignments (assigned date/time columns, other_category_schedule) are left out -- they don't affect the
+    manual table's rows -- and the user's own manual slot choices are never part of it."""
+    import hashlib
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return ""
+    h = hashlib.sha256()
+    conn = sqlite3.connect(db_path)
+    tables = _TIMETABLE_SIGNATURE_TABLES
+    if mode == "online":
+        # The Online Theory Time Table reads only the seating chart (parent-child mapping is ignored there).
+        tables = ["institute_seating_chart", "institute_seating_chart_subjects"]
+    for table in tables:
+        if mode == "manual" and table == "other_category_schedule":
+            continue
+        try:
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+            if not cols:
+                continue
+            if mode == "manual" and table == "schedule_row_config":
+                cols = [c for c in cols if not c.startswith("assigned_")]
+            rows = conn.execute(f"SELECT {','.join(cols)} FROM {table}").fetchall()
+        except sqlite3.OperationalError:
+            continue
+        h.update(table.encode("utf-8"))
+        for line in sorted(repr(r) for r in rows):
+            h.update(line.encode("utf-8"))
+    conn.close()
+    return h.hexdigest()
+
+
+def save_generated_timetable(institute, year, session, mode, rows, unresolved, level1_filter, level2_filter):
+    """Stores the generated table (replacing any earlier one of that mode). Returns its meta dict."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    meta = {
+        "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "level1": list(level1_filter), "level2": list(level2_filter),
+        "signature": compute_timetable_signature(institute, year, session, mode),
+    }
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO saved_timetable (mode, generated_at, level1_filter, level2_filter, rows_json, unresolved_json, signature)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(mode) DO UPDATE SET generated_at=excluded.generated_at, level1_filter=excluded.level1_filter,
+            level2_filter=excluded.level2_filter, rows_json=excluded.rows_json,
+            unresolved_json=excluded.unresolved_json, signature=excluded.signature
+    """, (mode, meta["generated_at"], json.dumps(meta["level1"]), json.dumps(meta["level2"]),
+          json.dumps(rows), json.dumps(unresolved or []), meta["signature"]))
+    conn.commit()
+    conn.close()
+    return meta
+
+
+def load_generated_timetable(institute, year, session, mode, include_rows=True):
+    """The saved table of this mode, or None. include_rows=False returns just the meta (cheap):
+    {"generated_at", "level1", "level2", "signature"} (+ "rows", "unresolved" when include_rows)."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT generated_at, level1_filter, level2_filter, rows_json, unresolved_json, signature "
+            "FROM saved_timetable WHERE mode = ?", (mode,)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    if row is None:
+        return None
+    out = {"generated_at": row[0], "level1": json.loads(row[1]), "level2": json.loads(row[2]), "signature": row[5]}
+    if include_rows:
+        out["rows"] = json.loads(row[3])
+        out["unresolved"] = json.loads(row[4])
+    return out
+
+
+def delete_generated_timetable(institute, year, session, mode):
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM saved_timetable WHERE mode = ?", (mode,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    conn.close()
+
+
+# ==========================================================
+# ONLINE THEORY TIME TABLE (institute level)
+# ==========================================================
+# Built only from the Institute Seating Chart. For a Program Code + Semester, a Level 1 / Level 2 filter and a
+# set of ticked subjects: counts the students appearing for each subject (per scheme, every category in one
+# pool), splits them into batches of consecutive seat numbers by a "maximum students per batch", and lists
+# each batch with the date / start / end time the user entered. The Pre-requisites parent-child mapping is
+# deliberately NOT applied: every subject is counted exactly as the seating chart lists it.
+
+def normalize_online_config(config):
+    """Brings a saved/typed config to the multi-program, multi-semester shape:
+    {"program_codes":[...], "semester_labels":[...], "level1","level2", "subjects":[{"program_code",
+    "semester_label","scheme","subject","max_per_batch","times"}]}. Older saved configs (one program code and
+    one semester) are converted."""
+    cfg = dict(config)
+    pcs = cfg.get("program_codes") or ([cfg["program_code"]] if cfg.get("program_code") else [])
+    sems = cfg.get("semester_labels") or ([cfg["semester_label"]] if cfg.get("semester_label") else [])
+    cfg["program_codes"], cfg["semester_labels"] = list(pcs), list(sems)
+    subs = []
+    for s in cfg.get("subjects", []):
+        s = dict(s)
+        s.setdefault("program_code", pcs[0] if pcs else "")
+        s.setdefault("semester_label", sems[0] if sems else "")
+        subs.append(s)
+    cfg["subjects"] = subs
+    return cfg
+
+
+def get_online_theory_subjects(institute, year, session, program_codes, semester_labels, level1_filter, level2_filter):
+    """One entry per (program code, semester, scheme, subject) that has at least one student with a
+    Subject-Level1-Level2 entry matching the filter: {"program_code","semester_label","scheme","subject",
+    "levels","total","category_counts","students"}. program_codes / semester_labels may be a single value or
+    a list. A student counts once per subject however many matching entries (e.g. TH-SA and TH-FA) they have.
+    Different program codes (and semesters) are never mixed."""
+    if isinstance(program_codes, str):
+        program_codes = [program_codes]
+    if isinstance(semester_labels, str):
+        semester_labels = [semester_labels]
+    l1set, l2set = set(level1_filter or []), set(level2_filter or [])
+    sem_set = set(semester_labels or [])
+    groups = {}
+    for pc in program_codes or []:
+        for r in get_institute_seating_chart_for_program(institute, year, session, pc):
+            if r["semester_label"] not in sem_set:
+                continue
+            for (subj, l1, l2) in r["subjects"]:
+                if l1 not in l1set or l2 not in l2set:
+                    continue
+                g = groups.setdefault((pc, r["semester_label"], r["scheme"], subj), {"students": {}, "levels": set()})
+                g["students"][r["enrollment"]] = {
+                    "enrollment": r["enrollment"], "student_name": r["student_name"] or "",
+                    "seat_number": r["seat_number"] or "", "status": r["status"],
+                }
+                g["levels"].add(f"{l1}-{l2}")
+    sem_rank = lambda s: SEMESTER_NAMES.index(s) if s in SEMESTER_NAMES else 999
+    out = []
+    for key in sorted(groups, key=lambda k: (k[0], sem_rank(k[1]), k[2], k[3])):
+        pc, sem, scheme, subj = key
+        students = sorted(groups[key]["students"].values(), key=lambda s: s["enrollment"])
+        counts = {}
+        for s in students:
+            counts[s["status"]] = counts.get(s["status"], 0) + 1
+        out.append({
+            "program_code": pc, "semester_label": sem, "scheme": scheme, "subject": subj,
+            "levels": sorted(groups[key]["levels"]), "total": len(students),
+            "category_counts": {c: counts[c] for c in order_categories(counts)}, "students": students,
+        })
+    return out
+
+
+def compute_online_batches(students, max_per_batch):
+    """Splits the students that have a numeric seat number into the fewest batches of at most
+    max_per_batch, as even as possible (remainder first), in seat-number order -- one pool, every category.
+    Returns (batches, non_numeric): batches = [{"batch_index","start_seat","end_seat","total",
+    "category_counts","students"}], non_numeric = students that cannot be placed in a seat range."""
+    numeric = [s for s in students if str(s["seat_number"]).strip().isdigit()]
+    non_numeric = [s for s in students if not str(s["seat_number"]).strip().isdigit()]
+    numeric.sort(key=lambda s: (int(str(s["seat_number"]).strip()), s["enrollment"]))
+    max_per_batch = int(max_per_batch)
+    if not numeric or max_per_batch < 1:
+        return [], non_numeric
+    n_batches = -(-len(numeric) // max_per_batch)  # ceiling
+    batches, idx = [], 0
+    for bi, size in enumerate(compute_default_batch_sizes(len(numeric), n_batches)):
+        chunk = numeric[idx:idx + size]
+        idx += size
+        counts = {}
+        for s in chunk:
+            counts[s["status"]] = counts.get(s["status"], 0) + 1
+        batches.append({
+            "batch_index": bi,
+            "start_seat": int(str(chunk[0]["seat_number"]).strip()),
+            "end_seat": int(str(chunk[-1]["seat_number"]).strip()),
+            "total": len(chunk), "category_counts": {c: counts[c] for c in order_categories(counts)},
+            "students": chunk,
+        })
+    return batches, non_numeric
+
+
+def _fmt_category_counts(counts):
+    return ", ".join(f"{c} {n}" for c, n in counts.items())
+
+
+def build_online_timetable_rows(institute, year, session, config):
+    """config (see normalize_online_config); subjects[i]["times"][j] = {"date" (YYYY-MM-DD), "start" (HH:MM),
+    "end" (HH:MM)} for batch j. Returns (rows, warnings, errors). Any error means the table must not be saved.
+    Warnings are information only (students without a numeric seat number; a student with overlapping exams,
+    also across programs/semesters) -- nothing is changed automatically."""
+    config = normalize_online_config(config)
+    infos = {(s["program_code"], s["semester_label"], s["scheme"], s["subject"]): s
+             for s in get_online_theory_subjects(
+                 institute, year, session, config["program_codes"], config["semester_labels"],
+                 config["level1"], config["level2"])}
+    rows, warnings, errors = [], [], []
+    intervals = {}  # enrollment -> [(date, start_min, end_min, text, name, seat)]
+    sem_rank = lambda s: SEMESTER_NAMES.index(s) if s in SEMESTER_NAMES else 999
+
+    def to_minutes(hhmm):
+        t_ = datetime.datetime.strptime(hhmm, "%H:%M")
+        return t_.hour * 60 + t_.minute
+
+    for sel in config["subjects"]:
+        pc, sem = sel["program_code"], sel["semester_label"]
+        sem_num = semester_number(sem)
+        label = f'{pc} / {sem.title()} / {sel["subject"]} (Scheme {sel["scheme"]})'
+        info = infos.get((pc, sem, sel["scheme"], sel["subject"]))
+        if info is None:
+            errors.append(f"{label}: no student matches the selection any more -- untick it.")
+            continue
+        try:
+            max_per = int(str(sel.get("max_per_batch", "")).strip())
+            if max_per < 1:
+                raise ValueError
+        except ValueError:
+            errors.append(f"{label}: enter a valid maximum number of students per batch.")
+            continue
+        batches, non_numeric = compute_online_batches(info["students"], max_per)
+        if non_numeric:
+            shown = ", ".join(f'{s["enrollment"]} (seat "{s["seat_number"]}")' for s in non_numeric[:6])
+            warnings.append(
+                f"{label}: {len(non_numeric)} student(s) have no numeric seat number and are NOT in any batch: "
+                f"{shown}{' ...' if len(non_numeric) > 6 else ''}")
+        times = sel.get("times") or []
+        compact = f'{pc}-{sem_num if sem_num is not None else "?"}-{sel["scheme"]}'
+        for b in batches:
+            tm = times[b["batch_index"]] if b["batch_index"] < len(times) else {}
+            date_s, start_s, end_s = (tm.get("date") or ""), (tm.get("start") or ""), (tm.get("end") or "")
+            tag = f'{label} B{b["batch_index"] + 1}'
+            try:
+                day = datetime.date.fromisoformat(date_s).strftime("%A")
+            except ValueError:
+                errors.append(f"{tag}: enter a valid date.")
+                continue
+            try:
+                s_min, e_min = to_minutes(start_s), to_minutes(end_s)
+            except ValueError:
+                errors.append(f"{tag}: enter a valid start and end time.")
+                continue
+            if e_min <= s_min:
+                errors.append(f"{tag}: the end time must be after the start time.")
+                continue
+            rows.append({
+                "date_iso": date_s, "date": format_date_ddmmyyyy(date_s), "day": day,
+                "start": start_s, "end": end_s,
+                "time": f"{format_time_12hr(start_s)} - {format_time_12hr(end_s)}",
+                "compact_code": compact, "program_code": pc, "semester_label": sem, "scheme": sel["scheme"],
+                "subject": sel["subject"], "levels": ", ".join(info["levels"]),
+                "subject_total": info["total"], "batch_index": b["batch_index"],
+                "batch_label": f'B{b["batch_index"] + 1}', "seat_range": f'{b["start_seat"]}-{b["end_seat"]}',
+                "num_students": b["total"], "categories": _fmt_category_counts(b["category_counts"]),
+                "members": [s["enrollment"] for s in b["students"]],
+            })
+            for s in b["students"]:
+                intervals.setdefault(s["enrollment"], []).append(
+                    (date_s, s_min, e_min, f'{pc} {sel["subject"]} B{b["batch_index"] + 1}', s["student_name"],
+                     s["seat_number"]))
+
+    def hm(minutes):
+        return format_time_12hr(f"{minutes // 60:02d}:{minutes % 60:02d}")
+
+    # Overlapping exams for one student (information only).
+    for enr in sorted(intervals):
+        items = sorted(intervals[enr])
+        for i in range(len(items) - 1):
+            for j in range(i + 1, len(items)):
+                a, b = items[i], items[j]
+                if a[0] != b[0] or b[1] >= a[2]:
+                    continue
+                warnings.append(
+                    f"{enr} ({a[4]}, seat {a[5]}): {a[3]} and {b[3]} overlap on {format_date_ddmmyyyy(a[0])} "
+                    f"({hm(a[1])}-{hm(a[2])} / {hm(b[1])}-{hm(b[2])}).")
+
+    rows.sort(key=lambda r: (r["date_iso"], r["start"], r["program_code"], sem_rank(r["semester_label"]),
+                             r["scheme"], r["subject"], r["batch_index"]))
+    for n, r in enumerate(rows, start=1):
+        r["sr_no"] = n
+    return rows, warnings, errors
+
+
+def save_online_timetable(institute, year, session, config, rows, warnings):
+    """Stores the generated table, replacing any earlier one. Returns its meta."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    meta = {
+        "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "signature": compute_timetable_signature(institute, year, session, "online"),
+    }
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO saved_online_timetable (id, generated_at, config_json, rows_json, warnings_json, signature)
+        VALUES (1, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET generated_at=excluded.generated_at, config_json=excluded.config_json,
+            rows_json=excluded.rows_json, warnings_json=excluded.warnings_json, signature=excluded.signature
+    """, (meta["generated_at"], json.dumps(config), json.dumps(rows), json.dumps(warnings), meta["signature"]))
+    conn.commit()
+    conn.close()
+    return meta
+
+
+def load_online_timetable(institute, year, session):
+    """{"generated_at","config","rows","warnings","signature"} of the saved table, or None."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT generated_at, config_json, rows_json, warnings_json, signature FROM saved_online_timetable WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    if row is None:
+        return None
+    return {"generated_at": row[0], "config": json.loads(row[1]), "rows": json.loads(row[2]),
+            "warnings": json.loads(row[3]), "signature": row[4]}
+
+
+def delete_online_timetable(institute, year, session):
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("DELETE FROM saved_online_timetable WHERE id = 1")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    conn.close()
+
+
+def generate_online_timetable_pdf(rows, warnings, institute, year, session, config, out_path=None):
+    """Print-ready landscape A4 PDF of the (saved) Online Theory Time Table: heading, one row per batch,
+    the warning list, then the signature block."""
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from xml.sax.saxutils import escape
+
+    config = normalize_online_config(config)
+    styles = getSampleStyleSheet()
+    cell = styles["Normal"].clone("otcell")
+    cell.fontSize, cell.leading, cell.alignment = 8, 10, TA_CENTER
+    left = cell.clone("otleft")
+    left.alignment = TA_LEFT
+    head = cell.clone("othdr")
+    head.fontName = "Helvetica-Bold"
+
+    def P(text, style=cell):
+        return Paragraph(escape(str(text)) if text not in (None, "") else "&nbsp;", style)
+
+    COLUMNS = [("Sr.No", 8), ("Date", 18), ("Day", 17), ("Time", 30), ("Program/Sem/Scheme", 22),
+               ("Subject", 18), ("Levels", 18), ("Total (subject)", 15), ("Batch", 10), ("Seat No. Range", 26),
+               ("No. of Students", 15), ("Category-wise", 28)]
+    margin = 6
+    scale = (297 - 2 * margin) / sum(w for _, w in COLUMNS)
+    widths = [w * scale * mm for _, w in COLUMNS]
+
+    out_path = out_path or os.path.join(
+        get_institute_timetable_reports_dir(institute, year, session), "Online_Theory_Time_Table.pdf")
+    doc = SimpleDocTemplate(out_path, pagesize=landscape(A4), leftMargin=margin * mm, rightMargin=margin * mm,
+                            topMargin=margin * mm, bottomMargin=margin * mm)
+    story = [
+        Paragraph(escape(institute), styles["Heading2"]),
+        Paragraph("Online Theory Time Table", styles["Heading3"]),
+        Paragraph(escape(f"Year / Session: {year} / {session}   |   Program Code(s): "
+                         f"{', '.join(config['program_codes'])}   |   Semester(s): "
+                         f"{', '.join(s.title() for s in config['semester_labels'])}"), styles["Normal"]),
+        Spacer(1, 4 * mm),
+    ]
+    data = [[P(label, head) for label, _ in COLUMNS]]
+    for r in rows:
+        data.append([P(r["sr_no"]), P(r["date"]), P(r["day"]), P(r["time"]), P(r["compact_code"]),
+                     P(r["subject"], left), P(r["levels"]), P(r["subject_total"]), P(r["batch_label"]),
+                     P(r["seat_range"]), P(r["num_students"]), P(r["categories"], left)])
+    t = Table(data, colWidths=widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4472C4")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+    ]))
+    story.append(t)
+    if warnings:
+        warn = styles["Normal"].clone("otwarn")
+        warn.fontSize = 8
+        warn.textColor = colors.HexColor("#B30000")
+        story.append(Spacer(1, 4 * mm))
+        story.append(Paragraph(f"Warnings ({len(warnings)}) -- nothing was changed automatically:", warn))
+        for w in warnings:
+            story.append(Paragraph(escape(f"- {w}"), warn))
+    story.extend(build_report_end_flowables())
+    doc.build(story)
+    return out_path
+
+
+def get_manual_schedule(institute, year, session):
+    """{unit_key: (assigned_date, assigned_session_index)} of every manually chosen slot."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return {}
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT unit_key, assigned_date, assigned_session_index FROM manual_schedule").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
+def save_manual_slot(institute, year, session, unit_key, assigned_date, assigned_session_index, is_auto=False):
+    """A slot chosen by hand (is_auto=False, the default) or placed by "Auto-fill remaining" (True).
+    Choosing/changing a slot by hand always makes it the user's own again."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        INSERT INTO manual_schedule (unit_key, assigned_date, assigned_session_index, is_auto) VALUES (?, ?, ?, ?)
+        ON CONFLICT(unit_key) DO UPDATE SET assigned_date=excluded.assigned_date,
+                                            assigned_session_index=excluded.assigned_session_index,
+                                            is_auto=excluded.is_auto
+    """, (unit_key, assigned_date, assigned_session_index, 1 if is_auto else 0))
+    conn.commit()
+    conn.close()
+
+
+def save_manual_slots_bulk(institute, year, session, assignments, is_auto=True):
+    """assignments: {unit_key: (date, session_index)} -- saved in one go."""
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.executemany("""
+        INSERT INTO manual_schedule (unit_key, assigned_date, assigned_session_index, is_auto) VALUES (?, ?, ?, ?)
+        ON CONFLICT(unit_key) DO UPDATE SET assigned_date=excluded.assigned_date,
+                                            assigned_session_index=excluded.assigned_session_index,
+                                            is_auto=excluded.is_auto
+    """, [(k, d, si, 1 if is_auto else 0) for k, (d, si) in assignments.items()])
+    conn.commit()
+    conn.close()
+
+
+def get_manual_auto_keys(institute, year, session):
+    """Unit keys whose saved manual slot was placed by Auto-fill (not chosen by the user)."""
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return set()
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute("SELECT unit_key FROM manual_schedule WHERE is_auto = 1").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return {r[0] for r in rows}
+
+
+def clear_auto_manual_slots(institute, year, session):
+    """Removes ONLY the auto-filled manual slots; the user's own choices stay. Returns the removed unit keys."""
+    keys = get_manual_auto_keys(institute, year, session)
+    if keys:
+        db_path = ensure_institute_seating_chart_db(institute, year, session)
+        conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM manual_schedule WHERE is_auto = 1")
+        conn.commit()
+        conn.close()
+    return keys
+
+
+def clear_manual_slot(institute, year, session, unit_key):
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM manual_schedule WHERE unit_key = ?", (unit_key,))
+    conn.commit()
+    conn.close()
+
+
+def clear_all_manual_schedule(institute, year, session):
+    db_path = ensure_institute_seating_chart_db(institute, year, session)
+    conn = sqlite3.connect(db_path)
+    n = conn.execute("DELETE FROM manual_schedule").rowcount
+    conn.commit()
+    conn.close()
+    return n
+
+
+def compute_manual_slot_options(units, slots, availability, assigned, allowed_by_semester=None):
+    """Which exam slots each unit may still be given, when slots are chosen by hand.
+
+    units:        [{"key", "workshop", "faculty", "members": [enrollment, ...], "batch": id or None}]
+                  ("batch" identifies an R batch -- same program/semester/scheme/batch number --
+                  which may hold only ONE exam per date, in any session)
+    slots:        get_day_slot_queue() list ({"date", "session_index", ...}), in order
+    availability: {(faculty, date, session_index): True} -- faculty availability matrix
+    assigned:     {unit_key: (date, session_index)} -- slots already chosen manually
+
+    A slot is offered to a unit only if ALL of these hold:
+      - the unit's faculty is marked available in that slot;
+      - no OTHER unit already placed in that slot uses the same workshop;
+      - no OTHER unit already placed in that slot uses the same faculty;
+      - none of the unit's students already sit another exam in that same date+session
+        (the same date with a different session is fine);
+      - for an R batch: that batch has no other exam on the same DATE (any session);
+      - when allowed_by_semester ({semester: {(date, session_index)}}) is given: the slot lies inside the
+        unit's OWN semester's date range and sessions.
+    The unit's own current slot is always treated as free for itself, so it can be changed.
+    A unit without both workshop and faculty can't be clash-checked and gets no slots.
+
+    Returns {unit_key: {"slots": [indexes into `slots`], "reason": str or None}}.
+    """
+    from collections import Counter
+    slot_index = {(s["date"], s["session_index"]): i for i, s in enumerate(slots)}
+    by_key = {u["key"]: u for u in units}
+    ws_at, fac_at, enr_at = {}, {}, {}
+    batch_dates = {}  # batch id -> Counter of dates holding one of that batch's exams
+    for key, (d, si) in assigned.items():
+        u, idx = by_key.get(key), slot_index.get((d, si))
+        if u is None or idx is None:
+            continue
+        if u.get("batch"):
+            batch_dates.setdefault(u["batch"], Counter())[d] += 1
+        if u["workshop"]:
+            ws_at.setdefault(idx, Counter())[u["workshop"]] += 1
+        if u["faculty"]:
+            fac_at.setdefault(idx, Counter())[u["faculty"]] += 1
+        for m in set(u["members"]):
+            enr_at.setdefault(idx, Counter())[m] += 1
+
+    result = {}
+    for u in units:
+        if not (u["workshop"] and u["faculty"]):
+            result[u["key"]] = {"slots": [], "reason": "Save Workshop/Faculty first"}
+            continue
+        own = assigned.get(u["key"])
+        own_idx = slot_index.get(own) if own else None
+        members = set(u["members"])
+        ok, saw_available, saw_ws_fac_free, saw_date_free = [], False, False, False
+        own_date = own[0] if own else None
+        sem_allowed = None if allowed_by_semester is None else allowed_by_semester.get(u.get("semester_label"), set())
+        saw_allowed = sem_allowed is None
+        for idx, s in enumerate(slots):
+            if sem_allowed is not None and (s["date"], s["session_index"]) not in sem_allowed:
+                continue
+            saw_allowed = True
+            if not availability.get((u["faculty"], s["date"], s["session_index"])):
+                continue
+            saw_available = True
+            own_here = 1 if idx == own_idx else 0
+            if (ws_at.get(idx, Counter())[u["workshop"]] - own_here > 0
+                    or fac_at.get(idx, Counter())[u["faculty"]] - own_here > 0):
+                continue
+            saw_ws_fac_free = True
+            if u.get("batch"):
+                taken = batch_dates.get(u["batch"], Counter())[s["date"]] - (1 if s["date"] == own_date else 0)
+                if taken > 0:
+                    continue
+            saw_date_free = True
+            enr_c = enr_at.get(idx)
+            if enr_c and any(enr_c[m] - own_here > 0 for m in members):
+                continue
+            ok.append(idx)
+        reason = None
+        if not ok:
+            if not saw_allowed:
+                reason = "No exam slot in this semester's date range"
+            elif not saw_available:
+                reason = f"Faculty '{u['faculty']}' is not marked available in any slot"
+            elif not saw_ws_fac_free:
+                reason = "Workshop/faculty already used in every slot the faculty is available"
+            elif not saw_date_free:
+                reason = "This R batch already has an exam on every remaining date (one exam per day)"
+            else:
+                reason = "A student already has another exam in every remaining slot"
+        result[u["key"]] = {"slots": ok, "reason": reason}
+    return result
+
+
+def autofill_manual_slots(units, slots, availability, assigned, sem_priority=None, subj_priority=None,
+                          allowed_by_semester=None, progress_cb=None):
+    """Places every unit that has no valid manual slot yet, WITHOUT moving any slot already in
+    `assigned` (the user's choices and earlier auto-fills are fixed obstacles). Same rules as
+    compute_manual_slot_options(): faculty available in the slot; the workshop and the faculty not used
+    in that slot by another unit; none of the unit's students already in that date+session; an R batch
+    may hold only one exam per date.
+
+    Order: semester priority, then subject priority within that semester+program, then larger groups
+    first. Any free slot may be used (not forced to follow batch order).
+
+    units: [{"key","workshop","faculty","members","batch","program_code","semester_label","subject"}]
+    Returns (new_assignments {key: (date, session_index)}, failures {key: reason}).
+    """
+    sem_priority = sem_priority or {}
+    subj_priority = subj_priority or {}
+    slot_index = {(s["date"], s["session_index"]): i for i, s in enumerate(slots)}
+    by_key = {u["key"]: u for u in units}
+
+    ws_at, fac_at, enr_at, batch_dates = {}, {}, {}, {}
+
+    def register(u, idx, date):
+        if u["workshop"]:
+            ws_at.setdefault(idx, set()).add(u["workshop"])
+        if u["faculty"]:
+            fac_at.setdefault(idx, set()).add(u["faculty"])
+        enr_at.setdefault(idx, set()).update(u["members"])
+        if u.get("batch"):
+            batch_dates.setdefault(u["batch"], set()).add(date)
+
+    placed = set()
+    for key, (d, si) in assigned.items():
+        u, idx = by_key.get(key), slot_index.get((d, si))
+        if u is None or idx is None:
+            continue  # unknown unit, or a slot that no longer exists -> treated as not placed
+        register(u, idx, d)
+        placed.add(key)
+
+    todo = [u for u in units if u["key"] not in placed]
+    todo.sort(key=lambda u: (
+        sem_priority.get(u.get("semester_label"), 999),
+        subj_priority.get((u.get("program_code"), u.get("semester_label"), u.get("subject")), 999),
+        -len(u["members"]), u.get("subject") or "", u["key"],
+    ))
+
+    new, failures = {}, {}
+    for n, u in enumerate(todo, start=1):
+        if not (u["workshop"] and u["faculty"]):
+            failures[u["key"]] = "Save Workshop/Faculty first"
+        else:
+            members = set(u["members"])
+            saw_available = saw_ws_fac_free = saw_date_free = False
+            sem_allowed = None if allowed_by_semester is None else allowed_by_semester.get(u.get("semester_label"), set())
+            saw_allowed = sem_allowed is None
+            chosen = None
+            for idx, s in enumerate(slots):
+                if sem_allowed is not None and (s["date"], s["session_index"]) not in sem_allowed:
+                    continue
+                saw_allowed = True
+                if not availability.get((u["faculty"], s["date"], s["session_index"])):
+                    continue
+                saw_available = True
+                if u["workshop"] in ws_at.get(idx, ()) or u["faculty"] in fac_at.get(idx, ()):
+                    continue
+                saw_ws_fac_free = True
+                if u.get("batch") and s["date"] in batch_dates.get(u["batch"], ()):
+                    continue
+                saw_date_free = True
+                if members & enr_at.get(idx, set()):
+                    continue
+                chosen = idx
+                break
+            if chosen is not None:
+                s = slots[chosen]
+                register(u, chosen, s["date"])
+                new[u["key"]] = (s["date"], s["session_index"])
+            elif not saw_allowed:
+                failures[u["key"]] = "No exam slot in this semester's date range"
+            elif not saw_available:
+                failures[u["key"]] = f"Faculty '{u['faculty']}' is not marked available in any slot"
+            elif not saw_ws_fac_free:
+                failures[u["key"]] = "Workshop/faculty already used in every slot the faculty is available"
+            elif not saw_date_free:
+                failures[u["key"]] = "This R batch already has an exam on every remaining date (one exam per day)"
+            else:
+                failures[u["key"]] = "A student already has another exam in every remaining slot"
+        if progress_cb:
+            progress_cb(n, len(todo))
+    if progress_cb and not todo:
+        progress_cb(1, 1)
+    return new, failures
+
+
+def get_batch_members_combined(institute, year, session, program_code, semester_label, scheme, subject, level1, level2,
+                                batch_index, start_seat, end_seat, pool_x_assignments_for_subject=None):
+    """Combines a batch's Pool R members (by seat-number range) with any
+    Pool X members explicitly assigned into that batch (via
+    assign_pool_x/pool_x_assignments) -- Section 4's report shows the
+    two pools' seat numbers together in one Seat No. Range / Total,
+    since from a room/scheduling standpoint they're the same physical
+    batch. Pass pool_x_assignments_for_subject (this subject's own
+    {enrollment: batch_index} dict, from get_pool_x_assignments) if
+    already fetched, to avoid re-querying it per batch.
+    Returns a list of {"enrollment", "seat_number"} dicts.
+    """
+    students = get_students_for_subject(institute, year, session, program_code, semester_label, scheme, subject, level1, level2)
+    pool_r, pool_x = get_seat_number_pools(institute, year, session, program_code, semester_label, scheme)
+    student_enrollments = {s["enrollment"] for s in students}
+    pool_r_in_subject = [p for p in pool_r if p["enrollment"] in student_enrollments]
+    pool_x_in_subject = [p for p in pool_x if p["enrollment"] in student_enrollments]
+
+    r_members = [p for p in pool_r_in_subject if start_seat <= int(p["seat_number"]) <= end_seat]
+
+    if pool_x_assignments_for_subject is None:
+        pool_x_assignments_for_subject = get_pool_x_assignments(institute, year, session).get(
+            (program_code, semester_label, scheme, subject, level1, level2), {}
+        )
+    x_members = [p for p in pool_x_in_subject if pool_x_assignments_for_subject.get(p["enrollment"]) == batch_index]
+
+    return [{"enrollment": p["enrollment"], "seat_number": p["seat_number"]} for p in (r_members + x_members)]
+
+
+def format_date_ddmmyyyy(date_iso):
+    """Converts an ISO date (YYYY-MM-DD, as stored) into dd-mm-yyyy for
+    display -- e.g. "2026-12-01" -> "01-12-2026". Returns the input
+    unchanged if it isn't a valid ISO date (e.g. "" or "--")."""
+    try:
+        d = datetime.date.fromisoformat(date_iso)
+    except (ValueError, TypeError):
+        return date_iso
+    return d.strftime("%d-%m-%Y")
+
+
+def format_time_12hr(time_24hr):
+    """Converts a 24-hour HH:MM time (as stored by the time pickers)
+    into 12-hour with AM/PM for display -- e.g. "13:30" -> "01:30 PM".
+    Returns the input unchanged if it isn't a valid HH:MM time."""
+    try:
+        t = datetime.datetime.strptime(time_24hr, "%H:%M")
+    except (ValueError, TypeError):
+        return time_24hr
+    return t.strftime("%I:%M %p").lstrip("0") or t.strftime("%I:%M %p")
+
+
+def semester_number(semester_label):
+    """Converts a semester label to its ordinal number (1-6) using
+    SEMESTER_NAMES order -- e.g. "FOURTH SEMESTER" -> 4. Used to build
+    Section 4's compact "Program/Semester/Scheme" code like "DC-2-K".
+    Returns None if the label isn't recognized.
+    """
+    try:
+        return SEMESTER_NAMES.index(semester_label) + 1
+    except ValueError:
+        return None
+
+
+def get_all_level1_level2(institute, year, session):
+    """Distinct Level1 and Level2 values across EVERY program code,
+    scheme, and semester in this institute+year+session's data --
+    Section 3's filter dropdown options. Level1/Level2 are unaffected
+    by parent-child expansion (a child inherits its parent's Level1/
+    Level2 unchanged), so this is a plain read of the raw subject
+    table -- no expansion needed here. Returns (level1_list, level2_list),
+    both sorted.
+    """
+    db_path = institute_seating_chart_db_path(institute, year, session)
+    if not os.path.exists(db_path):
+        return [], []
+    conn = sqlite3.connect(db_path)
+    try:
+        l1s = conn.execute("SELECT DISTINCT level1 FROM institute_seating_chart_subjects ORDER BY level1").fetchall()
+        l2s = conn.execute("SELECT DISTINCT level2 FROM institute_seating_chart_subjects ORDER BY level2").fetchall()
+    except sqlite3.OperationalError:
+        l1s, l2s = [], []
+    conn.close()
+    return [r[0] for r in l1s], [r[0] for r in l2s]
+
+
+def get_scheduling_matrix_rows(institute, year, session, level1_filter, level2_filter):
+    """Builds Section 4's row list. For every Program Code, every
+    Semester+Scheme combination is expanded through the Pre-requisites
+    parent-child mapping (expand_parent_child_subjects) BEFORE filtering
+    -- this is where that rule (built in Phase C, unwired until now)
+    actually takes effect: if a subject has children, the children
+    appear here, never the parent. Subjects are then kept only if their
+    Level1 is in level1_filter AND their Level2 is in level2_filter.
+
+    Row identity is (program_code, semester_label, scheme, subject,
+    level1, level2) -- one row per semester a subject actually occurs
+    in (this is what lets "Batches" be scoped to one specific semester,
+    per Section 2.3's own per-semester batch configs). Each row ALSO
+    carries "all_semesters" -- every semester (in SEMESTER_NAMES order)
+    this same program+scheme+subject recurs in, across the whole
+    dataset -- so the semester-tick columns can still show the full
+    multi-semester picture even though the row itself is anchored to
+    one semester for its batch-related columns.
+
+    Sorted by the project's hierarchy: Program Code -> Semester ->
+    Scheme -> Subject/Level1/Level2 (stable tie-breaker).
+    """
+    program_codes = get_institute_seating_chart_program_codes(institute, year, session)
+    l1_set, l2_set = set(level1_filter), set(level2_filter)
+
+    all_semesters_by_key = {}  # (program_code, scheme, subject, level1, level2) -> set of semesters
+    for pc in program_codes:
+        prog_rows = get_institute_seating_chart_for_program(institute, year, session, pc)
+        by_sem_scheme = {}
+        for r in prog_rows:
+            by_sem_scheme.setdefault((r["semester_label"], r["scheme"]), set()).update(r["subjects"])
+        for (sem, scheme), triple_set in by_sem_scheme.items():
+            expanded = set(expand_parent_child_subjects(institute, year, session, pc, sem, scheme, sorted(triple_set)))
+            for (subj, l1, l2) in expanded:
+                if l1 not in l1_set or l2 not in l2_set:
+                    continue
+                key = (pc, scheme, subj, l1, l2)
+                all_semesters_by_key.setdefault(key, set()).add(sem)
+
+    sem_index = {s: i for i, s in enumerate(SEMESTER_NAMES)}
+    result = []
+    for key, sems in all_semesters_by_key.items():
+        pc, scheme, subj, l1, l2 = key
+        ordered_all_sems = sorted(sems, key=lambda s: sem_index.get(s, 999))
+        for sem in ordered_all_sems:
+            result.append({
+                "program_code": pc, "semester_label": sem, "scheme": scheme,
+                "subject": subj, "level1": l1, "level2": l2, "all_semesters": ordered_all_sems,
+            })
+
+    result.sort(key=lambda r: (r["program_code"], sem_index.get(r["semester_label"], 999), r["scheme"], r["subject"], r["level1"], r["level2"]))
+    return result
+
+
+def get_subject_student_counts(institute, year, session, matrix_rows):
+    """{(program_code, semester_label, scheme, subject, level1, level2): number of students appearing} for the
+    rows of get_scheduling_matrix_rows(). Same counting as len(get_students_for_subject(...)) (parent-child
+    mapping applied, a student counted once per subject entry) but done in one pass per program code."""
+    counts = {}
+    by_pc = {}
+    for r in matrix_rows:
+        by_pc.setdefault(r["program_code"], []).append(r)
+    for pc, rws in by_pc.items():
+        lookup = {}
+        for m in get_parent_child_mappings(institute, year, session, pc):
+            lookup.setdefault((m["semester_label"], m["scheme"]), {})[
+                (m["parent_subject"], m["parent_level1"], m["parent_level2"])] = m["children"]
+        tallies = {}
+        for sr in get_institute_seating_chart_for_program(institute, year, session, pc):
+            lk = lookup.get((sr["semester_label"], sr["scheme"]), {})
+            expanded = set()
+            for triple in sr["subjects"]:
+                if triple in lk:
+                    expanded.update((child, triple[1], triple[2]) for child in lk[triple])
+                else:
+                    expanded.add(triple)
+            for triple in expanded:
+                key = (sr["semester_label"], sr["scheme"], triple)
+                tallies[key] = tallies.get(key, 0) + 1
+        for r in rws:
+            counts[(pc, r["semester_label"], r["scheme"], r["subject"], r["level1"], r["level2"])] = tallies.get(
+                (r["semester_label"], r["scheme"], (r["subject"], r["level1"], r["level2"])), 0)
+    return counts
+
+
+def get_students_for_subject(institute, year, session, program_code, semester_label, scheme, subject, level1, level2):
+    """Students (sorted by enrollment ascending) whose EXPANDED
+    (parent-child-aware) subject list for this program+semester+scheme
+    includes (subject, level1, level2) -- feeds Section 4's Total
+    Students and the batch-slicing that produces its Seat No. Range.
+    Returns [{"enrollment", "seat_number"}, ...].
+    """
+    program_rows = get_institute_seating_chart_for_program(institute, year, session, program_code)
+    filtered = [r for r in program_rows if r["semester_label"] == semester_label and r["scheme"] == scheme]
+    target = (subject, level1, level2)
+    result = []
+    for r in filtered:
+        expanded = expand_parent_child_subjects(institute, year, session, program_code, semester_label, scheme, r["subjects"])
+        if target in expanded:
+            result.append({"enrollment": r["enrollment"], "seat_number": r["seat_number"]})
+    result.sort(key=lambda x: x["enrollment"])
+    return result
 
 
 # ==========================================================
