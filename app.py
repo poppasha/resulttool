@@ -415,7 +415,7 @@ state = {
     # same running server at once). Flagging honestly rather than
     # quietly leaving it as a surprise for later.
     "logged_in": None,      # None, or {"type": "institute", ...}/{"type": "department", ...}
-    "auth_view": "login",   # "login" | "signup" | "verify" | "forgot"
+    "auth_view": "login",   # "login" | "signup" | "forgot"
     "login_type": "institute",  # which tab is active on the login screen
     "login_institute_username": "",
     "login_institute_password": "",
@@ -426,8 +426,6 @@ state = {
     "signup_username": "",
     "signup_password": "",
     "signup_recovery_email": "",
-    "verify_username": "",
-    "verify_code": "",
     "forgot_recovery_email": "",
 
     # Institute Dashboard, Tile 1 (Generate Departments)
@@ -6761,8 +6759,8 @@ def render_signup_screen():
         ui.input(label="Recovery Email", value=state["signup_recovery_email"],
                   on_change=on_email).classes("w-full mt-2").props("outlined dense")
         ui.label(
-            "A verification code will be sent to your recovery email -- you'll need it "
-            "on the next screen before you can log in."
+            "The recovery email is only used if you forget your username or password -- "
+            "make sure it is typed correctly."
         ).classes("text-xs text-gray-500 mt-2")
 
         def do_signup():
@@ -6773,53 +6771,19 @@ def render_signup_screen():
             if not name or not username or not password or not email:
                 ui.notify("Fill in every field first.", type="warning")
                 return
+            if "@" not in email or "." not in email.split("@")[-1]:
+                ui.notify("Enter a valid recovery email address.", type="warning")
+                return
             ok, err = mt.sign_up_institute(name, username, password, email)
             if not ok:
                 ui.notify(err, type="negative")
                 return
-            state["verify_username"] = username
-            state["auth_view"] = "verify"
-            ui.notify("Account created -- check your recovery email for the code.", type="positive")
+            state["auth_view"] = "login"
+            state["login_institute_username"] = username
+            ui.notify("Account created -- you can log in now.", type="positive")
             render_page_body()
 
         ui.button("Sign Up", icon="how_to_reg", on_click=do_signup).classes("w-full mt-3").props(
-            "unelevated color=primary"
-        )
-
-        def back_to_login():
-            state["auth_view"] = "login"
-            render_page_body()
-
-        ui.link("Back to Login", "#").on("click", back_to_login).classes("text-sm mt-2")
-
-
-def render_verify_screen():
-    ui.label("Verify Your Email").classes("text-2xl font-bold mt-8")
-    with ui.card().classes("w-96 mt-4"):
-        ui.label(f"Enter the 6-digit code sent to your recovery email.").classes("text-sm text-gray-600")
-
-        def on_username(e):
-            state["verify_username"] = e.value
-
-        def on_code(e):
-            state["verify_code"] = e.value
-
-        ui.input(label="Username", value=state["verify_username"],
-                  on_change=on_username).classes("w-full mt-2").props("outlined dense")
-        ui.input(label="Verification Code", value=state["verify_code"],
-                  on_change=on_code).classes("w-full mt-2").props("outlined dense maxlength=6")
-
-        def do_verify():
-            ok, err = mt.verify_institute_email(state["verify_username"].strip(), state["verify_code"].strip())
-            if not ok:
-                ui.notify(err, type="negative")
-                return
-            ui.notify("Verified! You can log in now.", type="positive")
-            state["auth_view"] = "login"
-            state["login_institute_username"] = state["verify_username"]
-            render_page_body()
-
-        ui.button("Verify", icon="check_circle", on_click=do_verify).classes("w-full mt-3").props(
             "unelevated color=primary"
         )
 
@@ -6839,8 +6803,8 @@ def render_forgot_screen():
         ui.input(label="Recovery Email", value=state["forgot_recovery_email"],
                   on_change=on_email).classes("w-full").props("outlined dense")
         ui.label(
-            "If a verified account is found, your username and password will be emailed to "
-            "this address."
+            "If an account with this recovery email exists, its username and password "
+            "will be emailed to this address."
         ).classes("text-xs text-gray-500 mt-2")
 
         def do_forgot():
@@ -11004,8 +10968,6 @@ def render_page_body():
                 view = state["auth_view"]
                 if view == "signup":
                     render_signup_screen()
-                elif view == "verify":
-                    render_verify_screen()
                 elif view == "forgot":
                     render_forgot_screen()
                 else:

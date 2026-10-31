@@ -133,16 +133,27 @@ SEATING_DB_FILE = "seating_chart.db"
 # institute, department, or scheme context exists at all.
 AUTH_DB_FILE = "auth.db"
 
-# --- SMTP configuration for outgoing account emails (verification codes,
-# forgot-username/password) -- FILL THESE IN with real values before
-# email sending will actually work. Left blank, send_email() below will
-# raise a clear error rather than silently failing, so a missing
-# configuration is obvious immediately rather than discovered later. ---
-SMTP_HOST = ""            # e.g. "smtp.gmail.com"
-SMTP_PORT = 587           # 587 = STARTTLS (most common), 465 = SSL
-SMTP_USERNAME = ""        # the SENDING account's login (often same as SMTP_FROM)
-SMTP_PASSWORD = ""        # an app password, NOT the account's normal login password
-SMTP_FROM = ""            # the "From:" address shown to recipients
+# --- Outgoing email -- used ONLY by "Forgot Username/Password" (there is no
+# email verification at sign-up any more). Nothing secret is stored in this
+# file: everything is read from environment variables (on render.com: your
+# service's "Environment" tab).
+#
+# Preferred -- an HTTPS email API (Brevo). Works on hosts such as render.com's
+# free tier that BLOCK outbound SMTP ports (25/465/587):
+#     BREVO_API_KEY   -- API key from your Brevo account
+#     EMAIL_FROM      -- a sender address you verified in Brevo
+#     EMAIL_FROM_NAME -- optional display name
+EMAIL_API_KEY = os.environ.get("BREVO_API_KEY", "")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
+EMAIL_FROM_NAME = os.environ.get("EMAIL_FROM_NAME", "MSBTE Result Tool")
+
+# Fallback for running on your own PC -- plain SMTP (only used when the API
+# settings above are not set):
+SMTP_HOST = os.environ.get("SMTP_HOST", "")            # e.g. "smtp.gmail.com"
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))    # 587 = STARTTLS, 465 = SSL
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")    # an app password, not the normal login password
+SMTP_FROM = os.environ.get("SMTP_FROM", "")
 
 
 # ==========================================================
@@ -186,59 +197,67 @@ def init_auth_db(db_path=AUTH_DB_FILE):
     conn.close()
 
 
-def _generate_verification_code():
-    """A 6-digit numeric code, emailed to the recovery address at sign-up
-    time -- entered on a verification screen before the account can log
-    in at all. Zero-padded so it's always exactly 6 digits."""
-    return f"{random.randint(0, 999999):06d}"
-
-
 def send_email(to_address, subject, body):
-    """Sends one plain-text email via SMTP, using the SMTP_* constants
-    above. Raises a clear, specific error rather than failing silently:
-    - RuntimeError if SMTP_HOST/SMTP_FROM haven't been configured yet
-      (the most likely failure while this is still being set up).
-    - Whatever smtplib itself raises (auth failure, connection refused,
-      etc.) propagates unchanged -- the caller decides how to surface it
-      to the user (see sign_up_institute()/forgot_institute_credentials()
-      for how callers currently handle this).
-    """
-    if not SMTP_HOST or not SMTP_FROM:
-        raise RuntimeError(
-            "Email sending isn't configured yet -- fill in SMTP_HOST, "
-            "SMTP_USERNAME, SMTP_PASSWORD, and SMTP_FROM in msbte_tool.py "
-            "before sign-up/forgot-password emails can be sent."
-        )
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = SMTP_FROM
-    msg["To"] = to_address
-    msg.set_content(body)
+    """Sends one plain-text email. Used only by forgot_institute_credentials().
 
-    if SMTP_PORT == 465:
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
-            if SMTP_USERNAME:
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-    else:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            if SMTP_USERNAME:
-                server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
+    1) If BREVO_API_KEY + EMAIL_FROM are set, sends over HTTPS through Brevo's
+       API (works on render.com's free tier, which blocks SMTP ports).
+    2) Otherwise, if SMTP_HOST + SMTP_FROM are set, sends via plain SMTP
+       (fine on your own PC).
+    3) Otherwise raises a clear RuntimeError saying what to set.
+    Any network/API error propagates to the caller, which shows it to the user.
+    """
+    if EMAIL_API_KEY and EMAIL_FROM:
+        resp = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={"api-key": EMAIL_API_KEY, "Content-Type": "application/json"},
+            json={
+                "sender": {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME},
+                "to": [{"email": to_address}],
+                "subject": subject,
+                "textContent": body,
+            },
+            timeout=20,
+        )
+        if resp.status_code >= 300:
+            raise RuntimeError(f"Email service error {resp.status_code}: {resp.text}")
+        return
+
+    if SMTP_HOST and SMTP_FROM:
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = SMTP_FROM
+        msg["To"] = to_address
+        msg.set_content(body)
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+                if SMTP_USERNAME:
+                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+                server.starttls()
+                if SMTP_USERNAME:
+                    server.login(SMTP_USERNAME, SMTP_PASSWORD)
+                server.send_message(msg)
+        return
+
+    raise RuntimeError(
+        "Email sending isn't configured yet -- set the BREVO_API_KEY and EMAIL_FROM "
+        "environment variables (or SMTP_HOST / SMTP_FROM / SMTP_USERNAME / SMTP_PASSWORD "
+        "when running locally)."
+    )
 
 
 def sign_up_institute(institute_name, username, password, recovery_email, db_path=AUTH_DB_FILE):
-    """Creates a new, UNVERIFIED institute account and emails a 6-digit
-    verification code to recovery_email. The account cannot log in (see
-    authenticate_institute()) until verify_institute_email() confirms
-    that code.
+    """Creates a new institute account. There is NO email verification: the
+    account can log in immediately. The recovery email is only used by
+    "Forgot Username/Password" (see forgot_institute_credentials()).
 
     Returns (True, None) on success, or (False, error_message) if the
     username is already taken (checked globally -- institute usernames
-    and department usernames never collide with each other either,
-    since institute login and department login must always be tellable
-    apart) or if sending the verification email fails.
+    and department usernames never collide with each other, since
+    institute login and department login must always be tellable apart).
     """
     init_auth_db(db_path)
     conn = sqlite3.connect(db_path)
@@ -250,49 +269,10 @@ def sign_up_institute(institute_name, username, password, recovery_email, db_pat
         conn.close()
         return False, "That username is already taken."
 
-    code = _generate_verification_code()
     conn.execute(
         "INSERT INTO institutes (institute_name, username, password, recovery_email, "
-        "email_verified, verification_code) VALUES (?, ?, ?, ?, 0, ?)",
-        (institute_name, username, password, recovery_email, code),
-    )
-    conn.commit()
-    conn.close()
-
-    try:
-        send_email(
-            recovery_email, "Verify your MSBTE Result Tool account",
-            f"Your verification code is: {code}\n\n"
-            f"Enter this code on the sign-up screen to activate your account.",
-        )
-    except Exception as e:
-        return False, f"Account created, but the verification email failed to send: {e}"
-
-    return True, None
-
-
-def verify_institute_email(username, code, db_path=AUTH_DB_FILE):
-    """Confirms a sign-up verification code. Returns (True, None) and
-    marks the account verified (clearing the stored code) on a match;
-    (False, error_message) otherwise -- wrong code, or nothing pending
-    for this username at all.
-    """
-    conn = sqlite3.connect(db_path)
-    row = conn.execute(
-        "SELECT verification_code, email_verified FROM institutes WHERE username = ?", (username,)
-    ).fetchone()
-    if row is None:
-        conn.close()
-        return False, "No account found for that username."
-    stored_code, already_verified = row
-    if already_verified:
-        conn.close()
-        return True, None  # idempotent -- re-verifying an already-verified account is a no-op success
-    if code != stored_code:
-        conn.close()
-        return False, "That code doesn't match."
-    conn.execute(
-        "UPDATE institutes SET email_verified = 1, verification_code = NULL WHERE username = ?", (username,)
+        "email_verified, verification_code) VALUES (?, ?, ?, ?, 1, NULL)",
+        (institute_name, username, password, recovery_email),
     )
     conn.commit()
     conn.close()
@@ -302,9 +282,8 @@ def verify_institute_email(username, code, db_path=AUTH_DB_FILE):
 def authenticate_institute(username, password, db_path=AUTH_DB_FILE):
     """Checks Institute login credentials. Returns a dict {"id",
     "institute_name", "username", "recovery_email"} on success, or
-    (None, error_message) on failure -- distinguishing "wrong password",
-    "no such account", and "account not verified yet" so the login
-    screen can show the right message.
+    (None, error_message) on failure -- distinguishing "wrong password"
+    and "no such account" so the login screen can show the right message.
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -312,8 +291,6 @@ def authenticate_institute(username, password, db_path=AUTH_DB_FILE):
     conn.close()
     if row is None:
         return None, "No account found for that username."
-    if not row["email_verified"]:
-        return None, "This account hasn't been verified yet -- check your recovery email for the code."
     if row["password"] != password:
         return None, "Incorrect password."
     return {
@@ -347,27 +324,32 @@ def change_institute_credentials(institute_id, new_username=None, new_password=N
 
 
 def forgot_institute_credentials(recovery_email, db_path=AUTH_DB_FILE):
-    """Looks up the (verified) institute account matching recovery_email
-    and emails back its REAL, currently-stored username and password
-    as-is (no temporary/reset password -- see the project decision on
-    this). Returns (True, None) on success, or (False, error_message) if
-    no matching verified account exists or sending fails.
+    """Looks up the institute account(s) registered with recovery_email
+    (case-insensitive) and emails back the REAL, currently-stored username
+    and password as-is (no temporary/reset password -- see the project
+    decision on this). If more than one institute used the same recovery
+    email, all of them are listed in the one email. Returns (True, None)
+    on success, or (False, error_message) if no account matches or the
+    email fails to send.
     """
+    recovery_email = (recovery_email or "").strip()
+    if not recovery_email:
+        return False, "Enter your recovery email first."
+    init_auth_db(db_path)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM institutes WHERE recovery_email = ? AND email_verified = 1", (recovery_email,)
-    ).fetchone()
+    rows = conn.execute(
+        "SELECT * FROM institutes WHERE lower(recovery_email) = lower(?) ORDER BY id", (recovery_email,)
+    ).fetchall()
     conn.close()
-    if row is None:
-        return False, "No verified account found for that recovery email."
+    if not rows:
+        return False, "No account found for that recovery email."
+    parts = [
+        f"Institute: {r['institute_name']}\nUsername: {r['username']}\nPassword: {r['password']}"
+        for r in rows
+    ]
     try:
-        send_email(
-            recovery_email, "Your MSBTE Result Tool account details",
-            f"Institute: {row['institute_name']}\n"
-            f"Username: {row['username']}\n"
-            f"Password: {row['password']}",
-        )
+        send_email(recovery_email, "Your MSBTE Result Tool account details", "\n\n".join(parts))
     except Exception as e:
         return False, f"Found the account, but the email failed to send: {e}"
     return True, None
